@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # A throwaway Postgres for the integration/e2e tests. The database is named
+    # tsz_test so it mirrors the local `make test-integration` setup; migrations
+    # run automatically when the tests connect, so an empty DB is enough.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: tsz_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d tsz_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://app:app@localhost:5432/tsz_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet -tags=integration ./...
+
+      # -tags=integration runs the unit tests *and* the integration/e2e tests
+      # (the latter no longer skip because DATABASE_URL is set above).
+      - name: Test (unit + integration)
+        run: go test -tags=integration -cover ./...
+
+  # Build the image and push it to GHCR once tests pass. Runs only on pushes to
+  # main (not on PRs), so every merged commit gets a published image tagged with
+  # both `latest` and the commit SHA. Actual rollout is a later, separate step.
+  docker:
+    name: Build & push image
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # metadata-action lowercases the repository name for us.
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=sha
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

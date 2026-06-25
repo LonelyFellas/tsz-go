@@ -1,13 +1,16 @@
 GO ?= go
 MIGRATE_DIR := internal/platform/database/migrations
 
-.PHONY: run build test tidy fmt vet up down logs migrate-create
+.PHONY: run build test tidy fmt vet up down logs migrate migrate-create
 
 run: ## Run the server locally (needs DATABASE_URL + JWT_SECRET in env)
 	$(GO) run ./cmd/server
 
 build: ## Compile the server binary into ./bin
 	$(GO) build -o bin/server ./cmd/server
+
+migrate: ## Apply all pending migrations as a standalone step (needs DATABASE_URL)
+	$(GO) run ./cmd/migrate
 
 test: ## Run unit tests (no DB required)
 	$(GO) test -cover ./...
