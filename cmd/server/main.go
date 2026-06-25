@@ -1,0 +1,88 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/darwish/tsz-go/internal/auth"
+	"github.com/darwish/tsz-go/internal/config"
+	"github.com/darwish/tsz-go/internal/platform/database"
+	"github.com/darwish/tsz-go/internal/platform/httpserver"
+	"github.com/darwish/tsz-go/internal/user"
+)
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("server exited with error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// run wires up every dependency and starts the HTTP server. Keeping the
+// assembly in one place (instead of a DI framework) makes the dependency
+// graph obvious at this project size.
+func run() error {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+
+	pool, err := database.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	if err := database.Migrate(cfg.DatabaseURL); err != nil {
+		return err
+	}
+	slog.Info("migrations applied")
+
+	// Dependency wiring: repository -> service -> handler.
+	tokenManager := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
+	userRepo := user.NewRepository(pool)
+	userService := user.NewService(userRepo, tokenManager)
+	userHandler := user.NewHandler(userService)
+
+	router := httpserver.NewRouter(httpserver.Deps{
+		TokenManager: tokenManager,
+		UserHandler:  userHandler,
+	})
+
+	srv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		slog.Info("server listening", "addr", srv.Addr, "env", cfg.Env)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErr:
+		return err
+	case <-stop:
+		slog.Info("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
+	}
+}

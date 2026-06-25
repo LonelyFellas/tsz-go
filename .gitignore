@@ -1,0 +1,4 @@
+/bin/
+.env
+*.local.env
+.DS_Store
