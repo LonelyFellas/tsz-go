@@ -15,11 +15,25 @@ services:
       timeout: 5s
       retries: 5
 
+  # One-shot migration step. It runs to completion before the app starts,
+  # mirroring the production flow of migrating as a separate step rather than
+  # on every app boot.
+  migrate:
+    build: .
+    entrypoint: ["/bin/migrate"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://app:app@db:5432/tsz?sslmode=disable"
+
   app:
     build: .
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       PORT: "8080"
       DATABASE_URL: "postgres://app:app@db:5432/tsz?sslmode=disable"

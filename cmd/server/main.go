@@ -43,10 +43,14 @@ func run() error {
 	}
 	defer pool.Close()
 
-	if err := database.Migrate(cfg.DatabaseURL); err != nil {
-		return err
+	// Migrations run as a separate step in production (see ./cmd/migrate). Only
+	// migrate on boot when explicitly opted in via AUTO_MIGRATE=true.
+	if cfg.AutoMigrate {
+		if err := database.Migrate(cfg.DatabaseURL); err != nil {
+			return err
+		}
+		slog.Info("migrations applied")
 	}
-	slog.Info("migrations applied")
 
 	// Dependency wiring: repository -> service -> handler.
 	tokenManager := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)

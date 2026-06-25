@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -14,6 +15,10 @@ type Config struct {
 	JWTSecret   string
 	JWTTTL      time.Duration
 	Env         string
+	// AutoMigrate runs migrations on server startup. Off by default so
+	// production migrates as a separate step (see ./cmd/migrate); handy to
+	// enable locally via AUTO_MIGRATE=true.
+	AutoMigrate bool
 }
 
 func Load() (Config, error) {
@@ -23,6 +28,7 @@ func Load() (Config, error) {
 		JWTSecret:   os.Getenv("JWT_SECRET"),
 		JWTTTL:      getdur("JWT_TTL", 24*time.Hour),
 		Env:         getenv("APP_ENV", "development"),
+		AutoMigrate: getbool("AUTO_MIGRATE", false),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -45,6 +51,15 @@ func getdur(key string, fallback time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return fallback
+}
+
+func getbool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return fallback

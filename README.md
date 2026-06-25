@@ -45,7 +45,18 @@ cp .env.example .env       # then export the vars or use direnv
 make run
 ```
 
-Migrations run automatically on startup.
+## Migrations
+
+Migrations are a **standalone step**, not run on every app boot — this keeps
+production deploys controlled (migrate first, then roll out the app).
+
+```bash
+make migrate   # runs ./cmd/migrate against $DATABASE_URL
+```
+
+`docker compose up` runs a one-shot `migrate` service before the app starts, so
+the local stack is still ready out of the box. To make the server migrate on
+boot (handy for quick local runs), set `AUTO_MIGRATE=true`.
 
 ## Testing
 
