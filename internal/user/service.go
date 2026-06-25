@@ -14,15 +14,22 @@ import (
 
 var ErrInvalidCredentials = errors.New("invalid email or password")
 
-// Service holds the user business logic. It depends on the Repository and the
-// auth.TokenManager — both concrete here for simplicity, but easy to turn into
-// interfaces for unit testing when needed.
+// Store is the persistence behavior the Service depends on. Defining it as an
+// interface lets the service be unit-tested with an in-memory fake, while the
+// concrete *Repository satisfies it in production.
+type Store interface {
+	Create(ctx context.Context, u *User) error
+	GetByEmail(ctx context.Context, email string) (*User, error)
+	GetByID(ctx context.Context, id uuid.UUID) (*User, error)
+}
+
+// Service holds the user business logic.
 type Service struct {
-	repo  *Repository
+	repo  Store
 	token *auth.TokenManager
 }
 
-func NewService(repo *Repository, token *auth.TokenManager) *Service {
+func NewService(repo Store, token *auth.TokenManager) *Service {
 	return &Service{repo: repo, token: token}
 }
 

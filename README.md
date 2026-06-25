@@ -47,6 +47,17 @@ make run
 
 Migrations run automatically on startup.
 
+## Testing
+
+```bash
+make test              # unit tests, no DB required
+make test-integration  # unit + integration tests against a live Postgres
+```
+
+Integration tests run against a dedicated `tsz_test` database (created automatically
+if missing) so they never pollute the `tsz` development database. Override the target
+DB by exporting `DATABASE_URL` before running `make test-integration`.
+
 ## API
 
 ```bash
