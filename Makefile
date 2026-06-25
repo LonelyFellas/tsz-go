@@ -9,8 +9,15 @@ run: ## Run the server locally (needs DATABASE_URL + JWT_SECRET in env)
 build: ## Compile the server binary into ./bin
 	$(GO) build -o bin/server ./cmd/server
 
-test: ## Run all tests
-	$(GO) test ./...
+test: ## Run unit tests (no DB required)
+	$(GO) test -cover ./...
+
+test-integration: ## Run unit + integration tests against the dedicated tsz_test DB
+	@docker exec tsz-go-db-1 psql -U app -d postgres -tc \
+		"SELECT 1 FROM pg_database WHERE datname='tsz_test'" | grep -q 1 \
+		|| docker exec tsz-go-db-1 psql -U app -d postgres -c "CREATE DATABASE tsz_test"
+	DATABASE_URL="$${DATABASE_URL:-postgres://app:app@localhost:5432/tsz_test?sslmode=disable}" \
+		$(GO) test -tags=integration -cover ./...
 
 tidy: ## Sync go.mod / go.sum
 	$(GO) mod tidy
