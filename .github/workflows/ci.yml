@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # A throwaway Postgres for the integration/e2e tests. The database is named
+    # tsz_test so it mirrors the local `make test-integration` setup; migrations
+    # run automatically when the tests connect, so an empty DB is enough.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: tsz_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d tsz_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://app:app@localhost:5432/tsz_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet -tags=integration ./...
+
+      # -tags=integration runs the unit tests *and* the integration/e2e tests
+      # (the latter no longer skip because DATABASE_URL is set above).
+      - name: Test (unit + integration)
+        run: go test -tags=integration -cover ./...
