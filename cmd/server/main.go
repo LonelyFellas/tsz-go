@@ -15,6 +15,7 @@ import (
 	"github.com/darwish/tsz-go/internal/otp"
 	"github.com/darwish/tsz-go/internal/platform/database"
 	"github.com/darwish/tsz-go/internal/platform/httpserver"
+	applog "github.com/darwish/tsz-go/internal/platform/log"
 	"github.com/darwish/tsz-go/internal/session"
 	"github.com/darwish/tsz-go/internal/user"
 )
@@ -30,12 +31,15 @@ func main() {
 // assembly in one place (instead of a DI framework) makes the dependency
 // graph obvious at this project size.
 func run() error {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	// Bootstrap a structured logger before config so even config errors are
+	// JSON; once config is loaded, re-set it at the configured level.
+	slog.SetDefault(applog.New("info"))
 
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	slog.SetDefault(applog.New(cfg.LogLevel))
 
 	ctx := context.Background()
 
