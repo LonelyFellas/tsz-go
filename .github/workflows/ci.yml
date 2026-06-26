@@ -69,12 +69,29 @@ jobs:
       - name: Test (unit + integration)
         run: go test -race -tags=integration -cover ./...
 
+  # Lint the OpenAPI spec so a malformed or non-conformant spec (which still
+  # compiles via go:embed) is caught here rather than white-screening Swagger UI
+  # at runtime. Rule tuning lives in redocly.yaml; the lint fails the build on
+  # errors. Independent of the Go test job, so it runs in parallel.
+  openapi-lint:
+    name: Lint OpenAPI spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Redocly lint
+        run: npx --yes @redocly/cli@1 lint docs/openapi.yaml
+
   # Build the image and push it to GHCR once tests pass. Runs only on pushes to
   # main (not on PRs), so every merged commit gets a published image tagged with
   # both `latest` and the commit SHA. Actual rollout is a later, separate step.
   docker:
     name: Build & push image
-    needs: test
+    needs: [test, openapi-lint]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

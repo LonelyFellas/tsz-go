@@ -1,0 +1,19 @@
+# Redocly lint config for docs/openapi.yaml. Run: `redocly lint docs/openapi.yaml`.
+# CI runs this on every push/PR (see .github/workflows/ci.yml). Lint fails the
+# build on errors; the rules below are turned off because they flag intentional,
+# non-applicable choices for this API.
+extends:
+  - recommended
+
+rules:
+  # Private backend API — no public license to declare.
+  info-license: off
+  # The only server is the local dev URL by design; deployment URLs are injected
+  # per environment, not hard-coded into the committed spec.
+  no-server-example.com: off
+  # /healthz and the logout endpoints legitimately have no 4xx response.
+  operation-4xx-response: off
+
+apis:
+  main:
+    root: docs/openapi.yaml
