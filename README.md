@@ -14,6 +14,8 @@ move fast on business logic, not to prematurely scale.
 | Auth       | JWT (HS256) + bcrypt, role-aware        |
 | Config     | environment variables                   |
 | Logging    | `log/slog` (structured JSON, stdlib)    |
+| Metrics    | Prometheus (`/metrics`)                 |
+| Tracing    | OpenTelemetry (OTLP, opt-in)            |
 
 ## Layout
 
@@ -109,6 +111,21 @@ Two complementary layers guard the auth surface:
   host cycling through identifiers. Over-budget requests get a `429` with
   `Retry-After`. Set the rate to `0` to disable. Behind a proxy/LB, configure the
   engine's trusted proxies so `X-Forwarded-For` can't be spoofed to dodge the limit.
+
+## Observability
+
+- **Health** — `/healthz` is liveness (process up, no dependencies) and `/readyz`
+  is readiness (pings the DB, so a load balancer stops routing to an instance
+  that's up but can't reach Postgres). Keep them on separate orchestrator probes.
+- **Metrics** — Prometheus RED metrics (`http_requests_total`,
+  `http_request_duration_seconds`, labelled by method/route/status) plus the Go
+  and process collectors at `/metrics`. Routes are labelled by template
+  (`/api/v1/auth/login`), never the raw URL, so cardinality stays bounded. Set
+  `METRICS_ENABLED=false` to drop the endpoint.
+- **Tracing** — OpenTelemetry spans via `otelgin`, **off by default**. Set
+  `TRACING_ENDPOINT` to an OTLP/HTTP collector (host:port) to start exporting;
+  while unset the tracer is a no-op, so the instrumentation costs effectively
+  nothing. `SERVICE_NAME` labels both metrics and traces.
 
 ## Tokens & single-device sessions
 

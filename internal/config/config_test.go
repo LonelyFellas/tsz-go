@@ -63,6 +63,15 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.AuthRateBurst != 10 {
 		t.Errorf("AuthRateBurst default = %d, want 10", cfg.AuthRateBurst)
 	}
+	if !cfg.MetricsEnabled {
+		t.Error("MetricsEnabled default = false, want true")
+	}
+	if cfg.TracingEndpoint != "" {
+		t.Errorf("TracingEndpoint default = %q, want empty (tracing off)", cfg.TracingEndpoint)
+	}
+	if cfg.ServiceName != "tsz-go" {
+		t.Errorf("ServiceName default = %q, want tsz-go", cfg.ServiceName)
+	}
 }
 
 func TestLoad_InvalidDurationFallsBack(t *testing.T) {

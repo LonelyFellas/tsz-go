@@ -45,6 +45,18 @@ type Config struct {
 	// (/docs/openapi.yaml). On by default; set DOCS_ENABLED=false to hide the API
 	// surface in production.
 	DocsEnabled bool
+	// MetricsEnabled exposes Prometheus metrics at /metrics (default true).
+	MetricsEnabled bool
+	// TracingEndpoint is the OTLP/HTTP collector address as host:port (e.g.
+	// localhost:4318). Empty (the default) disables tracing entirely: the global
+	// tracer stays a no-op, so the otelgin spans cost almost nothing and nothing
+	// is exported. Set it to start shipping traces.
+	TracingEndpoint string
+	// TracingInsecure sends traces over plain HTTP to the collector (default
+	// true); set TRACING_INSECURE=false when the collector terminates TLS.
+	TracingInsecure bool
+	// ServiceName labels metrics and traces (default "tsz-go").
+	ServiceName string
 }
 
 func Load() (Config, error) {
@@ -63,6 +75,10 @@ func Load() (Config, error) {
 		LogLevel:            getenv("LOG_LEVEL", "info"),
 		AutoMigrate:         getbool("AUTO_MIGRATE", false),
 		DocsEnabled:         getbool("DOCS_ENABLED", true),
+		MetricsEnabled:      getbool("METRICS_ENABLED", true),
+		TracingEndpoint:     os.Getenv("TRACING_ENDPOINT"),
+		TracingInsecure:     getbool("TRACING_INSECURE", true),
+		ServiceName:         getenv("SERVICE_NAME", "tsz-go"),
 	}
 
 	if cfg.DatabaseURL == "" {

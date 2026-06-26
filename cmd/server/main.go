@@ -17,6 +17,7 @@ import (
 	"github.com/darwish/tsz-go/internal/platform/database"
 	"github.com/darwish/tsz-go/internal/platform/httpserver"
 	applog "github.com/darwish/tsz-go/internal/platform/log"
+	"github.com/darwish/tsz-go/internal/platform/observability"
 	"github.com/darwish/tsz-go/internal/session"
 	"github.com/darwish/tsz-go/internal/user"
 )
@@ -85,12 +86,41 @@ func run() error {
 		authRateLimiter = httpserver.NewIPRateLimiter(cfg.AuthRateLimitPerMin, cfg.AuthRateBurst, 10*time.Minute)
 	}
 
+	// Tracing is opt-in: with no TRACING_ENDPOINT set, InitTracer installs
+	// nothing and the otelgin spans run against a no-op tracer. The shutdown
+	// flushes the exporter on exit.
+	tracerShutdown, err := observability.InitTracer(ctx, observability.TracingConfig{
+		Endpoint:    cfg.TracingEndpoint,
+		ServiceName: cfg.ServiceName,
+		Env:         cfg.Env,
+		Insecure:    cfg.TracingInsecure,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracerShutdown(shutdownCtx); err != nil {
+			slog.Error("tracer shutdown failed", "err", err)
+		}
+	}()
+
+	// Prometheus metrics: a RED middleware plus the /metrics scrape endpoint.
+	var metrics *httpserver.Metrics
+	if cfg.MetricsEnabled {
+		metrics = httpserver.NewMetrics()
+	}
+
 	router := httpserver.NewRouter(httpserver.Deps{
 		TokenManager:    tokenManager,
 		UserHandler:     userHandler,
 		OpenAPISpec:     docs.OpenAPISpec,
 		EnableDocs:      cfg.DocsEnabled,
 		AuthRateLimiter: authRateLimiter,
+		DB:              pool,
+		Metrics:         metrics,
+		ServiceName:     cfg.ServiceName,
 	})
 
 	srv := &http.Server{
