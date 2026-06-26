@@ -10,10 +10,28 @@ import (
 	"github.com/google/uuid"
 )
 
-// ContextUserIDKey is the gin context key under which the authenticated user's
-// ID is stored. It lives here so both the middleware and the domain handlers
-// can reference it without creating an import cycle.
-const ContextUserIDKey = "auth.userID"
+// Context keys under which the authenticated user's ID and active role are
+// stored on the gin context. They live here so both the middleware and the
+// domain handlers can reference them without creating an import cycle.
+const (
+	ContextUserIDKey = "auth.userID"
+	ContextRoleKey   = "auth.role"
+)
+
+// Claims is what a parsed token decodes to: who the user is, and which role
+// they are currently acting as ("active role"). A user may hold several roles;
+// switching role re-issues a token with a different Role.
+type Claims struct {
+	UserID uuid.UUID
+	Role   string
+}
+
+// tokenClaims is the on-the-wire JWT payload: the registered claims plus our
+// custom active-role claim.
+type tokenClaims struct {
+	Role string `json:"role"`
+	jwt.RegisteredClaims
+}
 
 type TokenManager struct {
 	secret []byte
@@ -24,21 +42,25 @@ func NewTokenManager(secret string, ttl time.Duration) *TokenManager {
 	return &TokenManager{secret: []byte(secret), ttl: ttl}
 }
 
-// Generate issues a signed HS256 token whose subject is the user ID.
-func (m *TokenManager) Generate(userID uuid.UUID) (string, error) {
+// Generate issues a signed HS256 token whose subject is the user ID and which
+// carries the active role.
+func (m *TokenManager) Generate(userID uuid.UUID, role string) (string, error) {
 	now := time.Now()
-	claims := jwt.RegisteredClaims{
-		Subject:   userID.String(),
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(m.ttl)),
+	claims := tokenClaims{
+		Role: role,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   userID.String(),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(m.ttl)),
+		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(m.secret)
 }
 
-// Parse validates a token and returns the user ID encoded in its subject.
-func (m *TokenManager) Parse(tokenString string) (uuid.UUID, error) {
-	claims := &jwt.RegisteredClaims{}
+// Parse validates a token and returns the user ID and active role it encodes.
+func (m *TokenManager) Parse(tokenString string) (Claims, error) {
+	claims := &tokenClaims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
@@ -46,12 +68,12 @@ func (m *TokenManager) Parse(tokenString string) (uuid.UUID, error) {
 		return m.secret, nil
 	})
 	if err != nil || !token.Valid {
-		return uuid.Nil, fmt.Errorf("invalid token: %w", err)
+		return Claims{}, fmt.Errorf("invalid token: %w", err)
 	}
 
 	id, err := uuid.Parse(claims.Subject)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("invalid token subject: %w", err)
+		return Claims{}, fmt.Errorf("invalid token subject: %w", err)
 	}
-	return id, nil
+	return Claims{UserID: id, Role: claims.Role}, nil
 }

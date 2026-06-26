@@ -29,13 +29,19 @@ func NewRouter(deps Deps) *gin.Engine {
 	{
 		// Public routes.
 		v1.POST("/auth/register", deps.UserHandler.Register)
-		v1.POST("/auth/login", deps.UserHandler.Login)
+		v1.POST("/auth/login", deps.UserHandler.Login)          // identifier + password
+		v1.POST("/auth/send-code", deps.UserHandler.SendCode)   // request a login code
+		v1.POST("/auth/login/code", deps.UserHandler.LoginCode) // identifier + code
 
 		// Authenticated routes.
 		authed := v1.Group("")
 		authed.Use(AuthRequired(deps.TokenManager))
 		{
 			authed.GET("/me", deps.UserHandler.Me)
+			// Switch the active role to one the user already holds.
+			authed.POST("/auth/switch-role", deps.UserHandler.SwitchRole)
+			// Acquire an additional identity (e.g. a student who also teaches).
+			authed.POST("/auth/roles", deps.UserHandler.AddRole)
 		}
 	}
 

@@ -36,13 +36,14 @@ func AuthRequired(tm *auth.TokenManager) gin.HandlerFunc {
 			return
 		}
 
-		userID, err := tm.Parse(parts[1])
+		claims, err := tm.Parse(parts[1])
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
 			return
 		}
 
-		c.Set(auth.ContextUserIDKey, userID)
+		c.Set(auth.ContextUserIDKey, claims.UserID)
+		c.Set(auth.ContextRoleKey, claims.Role)
 		c.Next()
 	}
 }

@@ -20,10 +20,11 @@ func init() { gin.SetMode(gin.TestMode) }
 
 // newTestHandler wires a Handler over a fake store and returns both so tests
 // can seed data and drive HTTP requests.
-func newTestHandler() (*Handler, *fakeStore, *auth.TokenManager) {
+func newTestHandler() (*Handler, *fakeStore, *fakeCodes, *auth.TokenManager) {
 	store := newFakeStore()
+	codes := newFakeCodes()
 	tm := auth.NewTokenManager("test-secret", time.Hour)
-	return NewHandler(NewService(store, tm)), store, tm
+	return NewHandler(NewService(store, tm, codes)), store, codes, tm
 }
 
 func doJSON(t *testing.T, h gin.HandlerFunc, body string) *httptest.ResponseRecorder {
@@ -51,18 +52,22 @@ func TestHandler_Register(t *testing.T) {
 		body       string
 		wantStatus int
 	}{
-		{"valid", `{"email":"a@b.com","password":"password123","display_name":"Alice"}`, http.StatusCreated},
-		{"invalid email", `{"email":"not-an-email","password":"password123","display_name":"Alice"}`, http.StatusBadRequest},
-		{"password too short", `{"email":"a@b.com","password":"short","display_name":"Alice"}`, http.StatusBadRequest},
-		{"password too long", `{"email":"a@b.com","password":"` + strings.Repeat("x", 73) + `","display_name":"Alice"}`, http.StatusBadRequest},
-		{"missing display name", `{"email":"a@b.com","password":"password123"}`, http.StatusBadRequest},
+		{"valid", `{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"Alice","role":"student"}`, http.StatusCreated},
+		{"valid no email", `{"phone":"13800138001","password":"password123","display_name":"Bob","role":"teacher"}`, http.StatusCreated},
+		{"missing phone", `{"email":"a@b.com","password":"password123","display_name":"Alice","role":"student"}`, http.StatusBadRequest},
+		{"invalid email", `{"phone":"13800138000","email":"not-an-email","password":"password123","display_name":"Alice","role":"student"}`, http.StatusBadRequest},
+		{"password too short", `{"phone":"13800138000","password":"short","display_name":"Alice","role":"student"}`, http.StatusBadRequest},
+		{"password too long", `{"phone":"13800138000","password":"` + strings.Repeat("x", 73) + `","display_name":"Alice","role":"student"}`, http.StatusBadRequest},
+		{"missing display name", `{"phone":"13800138000","password":"password123","role":"student"}`, http.StatusBadRequest},
+		{"missing role", `{"phone":"13800138000","password":"password123","display_name":"Alice"}`, http.StatusBadRequest},
+		{"invalid role", `{"phone":"13800138000","password":"password123","display_name":"Alice","role":"admin"}`, http.StatusBadRequest},
 		{"empty body", `{}`, http.StatusBadRequest},
 		{"malformed json", `{not json`, http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h, _, _ := newTestHandler()
+			h, _, _, _ := newTestHandler()
 			w := doJSON(t, h.Register, tt.body)
 			if w.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tt.wantStatus, w.Body)
@@ -72,13 +77,18 @@ func TestHandler_Register(t *testing.T) {
 }
 
 func TestHandler_Register_SuccessShape(t *testing.T) {
-	h, _, tm := newTestHandler()
-	w := doJSON(t, h.Register, `{"email":"a@b.com","password":"password123","display_name":"Alice"}`)
+	h, _, _, tm := newTestHandler()
+	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"Alice","role":"student"}`)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201", w.Code)
 	}
 	m := decode(t, w)
+
+	// the active role is echoed back
+	if m["active_role"] != "student" {
+		t.Errorf("active_role = %v, want student", m["active_role"])
+	}
 
 	// token must be present and valid
 	token, _ := m["token"].(string)
@@ -100,8 +110,8 @@ func TestHandler_Register_SuccessShape(t *testing.T) {
 }
 
 func TestHandler_Register_Duplicate409(t *testing.T) {
-	h, _, _ := newTestHandler()
-	body := `{"email":"dup@b.com","password":"password123","display_name":"Alice"}`
+	h, _, _, _ := newTestHandler()
+	body := `{"phone":"13800138000","email":"dup@b.com","password":"password123","display_name":"Alice","role":"student"}`
 
 	if w := doJSON(t, h.Register, body); w.Code != http.StatusCreated {
 		t.Fatalf("first register status = %d", w.Code)
@@ -113,20 +123,21 @@ func TestHandler_Register_Duplicate409(t *testing.T) {
 }
 
 func TestHandler_Login(t *testing.T) {
-	h, _, _ := newTestHandler()
+	h, _, _, _ := newTestHandler()
 	// seed a user via Register
-	_ = doJSON(t, h.Register, `{"email":"u@b.com","password":"password123","display_name":"U"}`)
+	_ = doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
 
 	tests := []struct {
 		name       string
 		body       string
 		wantStatus int
 	}{
-		{"success", `{"email":"u@b.com","password":"password123"}`, http.StatusOK},
-		{"wrong password", `{"email":"u@b.com","password":"nope"}`, http.StatusUnauthorized},
-		{"unknown email", `{"email":"ghost@b.com","password":"password123"}`, http.StatusUnauthorized},
-		{"invalid email format", `{"email":"bad","password":"password123"}`, http.StatusBadRequest},
-		{"missing password", `{"email":"u@b.com"}`, http.StatusBadRequest},
+		{"success by email", `{"identifier":"u@b.com","password":"password123"}`, http.StatusOK},
+		{"success by phone", `{"identifier":"13800138000","password":"password123"}`, http.StatusOK},
+		{"wrong password", `{"identifier":"u@b.com","password":"nope"}`, http.StatusUnauthorized},
+		{"unknown identifier", `{"identifier":"ghost@b.com","password":"password123"}`, http.StatusUnauthorized},
+		{"missing identifier", `{"password":"password123"}`, http.StatusBadRequest},
+		{"missing password", `{"identifier":"u@b.com"}`, http.StatusBadRequest},
 		{"malformed json", `nope`, http.StatusBadRequest},
 	}
 	for _, tt := range tests {
@@ -139,15 +150,45 @@ func TestHandler_Login(t *testing.T) {
 	}
 }
 
+func TestHandler_SendCodeAndLoginCode(t *testing.T) {
+	h, _, _, _ := newTestHandler()
+	// seed a user via Register
+	_ = doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
+
+	// send-code is always 200, even for an unknown identifier (no account probing)
+	if w := doJSON(t, h.SendCode, `{"identifier":"13800138000"}`); w.Code != http.StatusOK {
+		t.Fatalf("send-code status = %d, want 200 (body: %s)", w.Code, w.Body)
+	}
+	if w := doJSON(t, h.SendCode, `{"identifier":"19999999999"}`); w.Code != http.StatusOK {
+		t.Fatalf("send-code unknown status = %d, want 200", w.Code)
+	}
+	if w := doJSON(t, h.SendCode, `{}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("send-code missing identifier status = %d, want 400", w.Code)
+	}
+
+	// the fake issues "123456"; logging in with it succeeds
+	if w := doJSON(t, h.LoginCode, `{"identifier":"13800138000","code":"123456"}`); w.Code != http.StatusOK {
+		t.Fatalf("login-code status = %d, want 200 (body: %s)", w.Code, w.Body)
+	}
+	// wrong code → 401
+	if w := doJSON(t, h.LoginCode, `{"identifier":"13800138000","code":"000000"}`); w.Code != http.StatusUnauthorized {
+		t.Fatalf("login-code wrong status = %d, want 401", w.Code)
+	}
+	// missing code → 400
+	if w := doJSON(t, h.LoginCode, `{"identifier":"13800138000"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("login-code missing code status = %d, want 400", w.Code)
+	}
+}
+
 // The 500 branches: when the store returns an unexpected (non-domain) error,
 // every handler must respond 500 and must not leak the internal error.
 func TestHandler_InternalErrors(t *testing.T) {
 	boom := errors.New("db down")
 
 	t.Run("register 500", func(t *testing.T) {
-		h, store, _ := newTestHandler()
-		store.createFn = func(*User) error { return boom }
-		w := doJSON(t, h.Register, `{"email":"a@b.com","password":"password123","display_name":"A"}`)
+		h, store, _, _ := newTestHandler()
+		store.createFn = func(*User, Role) error { return boom }
+		w := doJSON(t, h.Register, `{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"A","role":"student"}`)
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", w.Code)
 		}
@@ -157,16 +198,16 @@ func TestHandler_InternalErrors(t *testing.T) {
 	})
 
 	t.Run("login 500", func(t *testing.T) {
-		h, store, _ := newTestHandler()
+		h, store, _, _ := newTestHandler()
 		store.getEmail = func(string) (*User, error) { return nil, boom }
-		w := doJSON(t, h.Login, `{"email":"a@b.com","password":"password123"}`)
+		w := doJSON(t, h.Login, `{"identifier":"a@b.com","password":"password123"}`)
 		if w.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", w.Code)
 		}
 	})
 
 	t.Run("me 500", func(t *testing.T) {
-		h, store, _ := newTestHandler()
+		h, store, _, _ := newTestHandler()
 		store.getID = func(uuid.UUID) (*User, error) { return nil, boom }
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
@@ -180,11 +221,11 @@ func TestHandler_InternalErrors(t *testing.T) {
 }
 
 func TestHandler_Me(t *testing.T) {
-	h, store, _ := newTestHandler()
+	h, store, _, _ := newTestHandler()
 
 	// seed a user directly in the store
 	id := uuid.New()
-	_ = store.Create(nil, &User{ID: id, Email: "me@b.com", PasswordHash: "x", DisplayName: "Me"})
+	_ = store.Create(nil, &User{ID: id, Phone: "13800138000", Email: "me@b.com", PasswordHash: "x", DisplayName: "Me"}, RoleStudent)
 
 	t.Run("found", func(t *testing.T) {
 		w := httptest.NewRecorder()

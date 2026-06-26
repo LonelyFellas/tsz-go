@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,11 +20,14 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/darwish/tsz-go/internal/auth"
+	"github.com/darwish/tsz-go/internal/otp"
 	"github.com/darwish/tsz-go/internal/platform/database"
 	"github.com/darwish/tsz-go/internal/user"
 )
 
-func buildRealRouter(t *testing.T) http.Handler {
+// buildRealRouter wires the full stack and returns the router plus the mock OTP
+// sender, so the test can read back the code that was "sent".
+func buildRealRouter(t *testing.T) (http.Handler, *otp.MockSender) {
 	t.Helper()
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
@@ -39,9 +43,11 @@ func buildRealRouter(t *testing.T) http.Handler {
 	t.Cleanup(pool.Close)
 
 	tm := auth.NewTokenManager("e2e-secret", time.Hour)
+	sender := otp.NewMockSender()
+	otpSvc := otp.NewService(otp.NewRepository(pool), sender, time.Minute)
 	repo := user.NewRepository(pool)
-	svc := user.NewService(repo, tm)
-	return NewRouter(Deps{TokenManager: tm, UserHandler: user.NewHandler(svc)})
+	svc := user.NewService(repo, tm, otpSvc)
+	return NewRouter(Deps{TokenManager: tm, UserHandler: user.NewHandler(svc)}), sender
 }
 
 func req(t *testing.T, r http.Handler, method, path, body, bearer string) *httptest.ResponseRecorder {
@@ -63,9 +69,10 @@ func req(t *testing.T, r http.Handler, method, path, body, bearer string) *httpt
 }
 
 func TestE2E_RegisterLoginMe(t *testing.T) {
-	r := buildRealRouter(t)
+	r, sender := buildRealRouter(t)
 	email := "e2e-" + uuid.NewString() + "@example.com"
-	body := `{"email":"` + email + `","password":"password123","display_name":"E2E"}`
+	phone := fmt.Sprintf("1%010d", time.Now().UnixNano()%1e10)
+	body := `{"phone":"` + phone + `","email":"` + email + `","password":"password123","display_name":"E2E","role":"student"}`
 
 	// healthz
 	if w := req(t, r, http.MethodGet, "/healthz", "", ""); w.Code != http.StatusOK {
@@ -95,8 +102,8 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 		t.Fatalf("duplicate register status = %d, want 409", w.Code)
 	}
 
-	// login → 200, fresh token
-	loginBody := `{"email":"` + email + `","password":"password123"}`
+	// password login by email → 200, fresh token
+	loginBody := `{"identifier":"` + email + `","password":"password123"}`
 	w = req(t, r, http.MethodPost, "/api/v1/auth/login", loginBody, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("login status = %d", w.Code)
@@ -105,6 +112,27 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 		Token string `json:"token"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &login)
+
+	// password login by phone → 200
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login", `{"identifier":"`+phone+`","password":"password123"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("phone login status = %d", w.Code)
+	}
+
+	// code login: request a code (always 200), read it from the mock sender, log in
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/send-code", `{"identifier":"`+phone+`"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("send-code status = %d", w.Code)
+	}
+	code := sender.LastCode(phone)
+	if code == "" {
+		t.Fatal("mock sender did not capture a code")
+	}
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login/code", `{"identifier":"`+phone+`","code":"`+code+`"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("login-by-code status = %d, body=%s", w.Code, w.Body)
+	}
+	// the code is single-use: replaying it → 401
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login/code", `{"identifier":"`+phone+`","code":"`+code+`"}`, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed code status = %d, want 401", w.Code)
+	}
 
 	// me with token → 200 and matches the registered user
 	w = req(t, r, http.MethodGet, "/api/v1/me", "", login.Token)
@@ -115,13 +143,46 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 		t.Errorf("me did not return the expected user: %s", w.Body)
 	}
 
+	// switching to a role the user does not yet hold → 403
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/switch-role", `{"role":"teacher"}`, login.Token); w.Code != http.StatusForbidden {
+		t.Fatalf("switch-role-unowned status = %d, want 403", w.Code)
+	}
+
+	// acquire the teacher identity → 201 with a token already switched to it
+	w = req(t, r, http.MethodPost, "/api/v1/auth/roles", `{"role":"teacher"}`, login.Token)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("add-role status = %d, body=%s", w.Code, w.Body)
+	}
+	var added struct {
+		Token      string `json:"token"`
+		ActiveRole string `json:"active_role"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &added)
+	if added.ActiveRole != "teacher" {
+		t.Errorf("added active_role = %q, want teacher", added.ActiveRole)
+	}
+
+	// me now reports both roles
+	w = req(t, r, http.MethodGet, "/api/v1/me", "", added.Token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("me status = %d", w.Code)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"active_role":"teacher"`)) {
+		t.Errorf("me active_role not teacher: %s", w.Body)
+	}
+
+	// switching back to student now succeeds → 200
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/switch-role", `{"role":"student"}`, login.Token); w.Code != http.StatusOK {
+		t.Fatalf("switch-role status = %d, want 200", w.Code)
+	}
+
 	// me without token → 401
 	if w := req(t, r, http.MethodGet, "/api/v1/me", "", ""); w.Code != http.StatusUnauthorized {
 		t.Fatalf("me-without-token status = %d, want 401", w.Code)
 	}
 
 	// login wrong password → 401
-	bad := `{"email":"` + email + `","password":"wrongpass"}`
+	bad := `{"identifier":"` + email + `","password":"wrongpass"}`
 	if w := req(t, r, http.MethodPost, "/api/v1/auth/login", bad, ""); w.Code != http.StatusUnauthorized {
 		t.Fatalf("bad-login status = %d, want 401", w.Code)
 	}
