@@ -2,13 +2,14 @@
 package httpserver
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
 	"github.com/darwish/tsz-go/internal/auth"
 	"github.com/darwish/tsz-go/internal/user"
 )
+
+const metricsPath = "/metrics"
 
 // Deps holds everything the router needs to register routes. Add new domain
 // handlers here as the app grows.
@@ -23,17 +24,36 @@ type Deps struct {
 	// AuthRateLimiter throttles the public auth endpoints per client IP. Nil
 	// disables the throttle (e.g. in tests, or when configured off).
 	AuthRateLimiter *IPRateLimiter
+	// DB backs the /readyz probe. Nil makes readiness a pure liveness check.
+	DB Pinger
+	// Metrics, when set, mounts the Prometheus middleware and /metrics endpoint.
+	Metrics *Metrics
+	// ServiceName labels the otelgin trace spans.
+	ServiceName string
 }
 
 func NewRouter(deps Deps) *gin.Engine {
 	r := gin.New()
-	// RequestID first so Recovery and RequestLogger can stamp the ID; Recovery
-	// before RequestLogger so a panic still produces a request log line.
-	r.Use(RequestID(), Recovery(), RequestLogger())
 
-	r.GET("/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+	// RequestID first so everything downstream can stamp the ID. otelgin opens a
+	// span per request (a no-op tracer when tracing is disabled). Metrics sits
+	// outside Recovery so a recovered panic is still counted as a 500. Recovery
+	// before RequestLogger so a panic still produces a request log line.
+	r.Use(RequestID())
+	r.Use(otelgin.Middleware(deps.ServiceName))
+	if deps.Metrics != nil {
+		r.Use(deps.Metrics.Middleware())
+	}
+	r.Use(Recovery(), RequestLogger())
+
+	// Liveness ("is the process up?") and readiness ("can it serve traffic?").
+	// Orchestrators probe these separately, so they are kept distinct.
+	r.GET("/healthz", livenessHandler)
+	r.GET("/readyz", readinessHandler(deps.DB))
+
+	if deps.Metrics != nil {
+		r.GET(metricsPath, deps.Metrics.Handler())
+	}
 
 	if deps.EnableDocs {
 		registerDocs(r, deps.OpenAPISpec)

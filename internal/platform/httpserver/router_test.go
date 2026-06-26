@@ -20,6 +20,35 @@ func newTestRouter() http.Handler {
 	})
 }
 
+// /readyz and /metrics must be mounted when their deps are supplied.
+func TestRouter_ObservabilityEndpoints(t *testing.T) {
+	router := NewRouter(Deps{
+		TokenManager: auth.NewTokenManager("secret", time.Hour),
+		UserHandler:  user.NewHandler(nil, user.CookieConfig{}, 15*time.Minute, 720*time.Hour),
+		DB:           fakePinger{},
+		Metrics:      NewMetrics(),
+		ServiceName:  "test",
+	})
+
+	for _, path := range []string{"/readyz", "/metrics"} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusOK {
+			t.Errorf("%s status = %d, want 200", path, w.Code)
+		}
+	}
+}
+
+// With no Metrics dep, /metrics is not registered.
+func TestRouter_MetricsDisabled(t *testing.T) {
+	w := httptest.NewRecorder()
+	newTestRouter().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 when metrics are off", w.Code)
+	}
+}
+
 func TestRouter_Healthz(t *testing.T) {
 	w := httptest.NewRecorder()
 	newTestRouter().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
