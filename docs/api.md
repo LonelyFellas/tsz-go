@@ -8,18 +8,18 @@ REST API for the tsz-go backend. All endpoints are JSON over HTTP.
 
 ## Authentication
 
-The API uses **JWT access tokens** + **refresh tokens**.
+The API uses **JWT access tokens** + **refresh tokens**, stored differently by design (see [auth-token-storage.md](auth-token-storage.md) for the full rationale and frontend guide):
 
-- Send the access token on protected endpoints via the header:
-  `Authorization: Bearer <access_token>`
-- **Access token** lifetime: **15 minutes** (default, `JWT_TTL`). Carries the user ID and active role.
-- **Refresh token** lifetime: **30 days** (default, `REFRESH_TOKEN_TTL`). Used only against `POST /api/v1/auth/refresh` to obtain a fresh access token.
+- **Access token** — returned in the JSON body. Lifetime **15 minutes** (default, `JWT_TTL`). Carries the user ID and active role. Send it on protected endpoints via the header `Authorization: Bearer <access_token>`. Keep it in memory, not `localStorage`.
+- **Refresh token** — delivered as an **HttpOnly, Secure, SameSite=Strict cookie** (scoped to `Path=/api/v1/auth`), **not in the body**. Lifetime **30 days** (default, `REFRESH_TOKEN_TTL`). The browser sends it automatically to `/auth/refresh` and `/auth/logout`; frontend JS never reads or stores it. Make requests with credentials (`withCredentials: true` / `credentials: 'include'`).
+
+> **Why a cookie?** A refresh token is the long-lived "master key". HttpOnly keeps JS (and thus XSS) from ever reading it; SameSite=Strict + the narrow path defend against CSRF. The short-lived access token stays in memory, so an XSS at worst grabs a token that expires in ≤15 min.
 
 ### Single-device login
 
-Login is **strict single-device**. Each successful login/register issues a refresh token and **revokes the user's previous sessions**. When a refresh token is used, it is **rotated** (the old one stops working and a new one is returned). A device that was logged out elsewhere keeps working only until its access token expires (≤ 15 min), after which its next refresh fails with `401`.
+Login is **strict single-device**. Each successful login/register issues a refresh token and **revokes the user's previous sessions**. When the refresh cookie is used, it is **rotated** (the old one stops working and a new one is set via `Set-Cookie`). A device that was logged out elsewhere keeps working only until its access token expires (≤ 15 min), after which its next refresh fails with `401`.
 
-> **Frontend implication:** store both `access_token` and `refresh_token`. On a `401` from a protected endpoint, call `/auth/refresh`, save the **new** `refresh_token` it returns, and retry. If refresh itself returns `401`, the session is dead — send the user back to login.
+> **Frontend implication:** keep the `access_token` in memory; the refresh token rides in the cookie automatically. On a `401` from a protected endpoint, call `/auth/refresh` (no body), save the **new** `access_token` it returns, and retry. If refresh itself returns `401`, the session is dead — send the user back to login.
 
 ## Handling 401 errors
 
@@ -29,8 +29,9 @@ All `401` responses share the same shape but come from different sources. Use th
 
 | `error` value | Source | Meaning |
 |---|---|---|
-| `invalid credentials` | `/auth/login`, `/auth/login/code` | Wrong phone/email or password/code |
-| `invalid refresh token` | `/auth/refresh` | Refresh token expired, revoked, or invalid |
+| `invalid credentials` | `/auth/login`, `/auth/login/code` | Wrong phone/email or password/code; also returned after 5 consecutive wrong code attempts (code is locked) |
+| `missing refresh token` | `/auth/refresh` | No refresh-token cookie sent (requires `withCredentials`) |
+| `invalid refresh token` | `/auth/refresh` | Refresh token expired, revoked, or tampered; stale cookie is cleared |
 | `missing or malformed authorization header` | Any authenticated endpoint | `Authorization` header is absent or not `Bearer <token>` |
 | `invalid or expired token` | Any authenticated endpoint | Access token has expired or is tampered |
 
@@ -56,12 +57,15 @@ response.status === 401 ?
 
 ```ts
 // http.ts
-const http = axios.create({ baseURL: '/api/v1' })
+let accessToken: string | null = null
+export const setAccessToken = (t: string | null) => { accessToken = t }
 
-// Attach access token to every request
+// withCredentials makes the browser send/receive the refresh cookie
+const http = axios.create({ baseURL: '/api/v1', withCredentials: true })
+
+// Attach the in-memory access token to every request
 http.interceptors.request.use(config => {
-  const token = localStorage.getItem('access_token')
-  if (token) config.headers.Authorization = `Bearer ${token}`
+  if (accessToken) config.headers.Authorization = `Bearer ${accessToken}`
   return config
 })
 
@@ -82,8 +86,7 @@ http.interceptors.response.use(
 
     // ② Refresh failed — session is over
     if (status === 401 && url.includes('/auth/refresh')) {
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('refresh_token')
+      setAccessToken(null)
       window.location.href = '/login'
       return Promise.reject(err)
     }
@@ -92,10 +95,8 @@ http.interceptors.response.use(
     if (status === 401 && errorMsg === 'invalid or expired token' && !err.config._retry) {
       err.config._retry = true
       try {
-        const refreshToken = localStorage.getItem('refresh_token')
-        const { data } = await http.post('/auth/refresh', { refresh_token: refreshToken })
-        localStorage.setItem('access_token', data.access_token)
-        localStorage.setItem('refresh_token', data.refresh_token)         // always save the new one
+        const { data } = await http.post('/auth/refresh')   // no body; refresh cookie is sent automatically
+        setAccessToken(data.access_token)                    // rotated refresh token comes back as a cookie
         err.config.headers.Authorization = `Bearer ${data.access_token}`
         return http(err.config)   // retry original request
       } catch {
@@ -113,11 +114,12 @@ export default http
 
 ```ts
 // api/auth.ts — login only needs to handle its own 401
+import http, { setAccessToken } from './http'
+
 export async function login(identifier: string, password: string) {
   try {
     const { data } = await http.post('/auth/login', { identifier, password })
-    localStorage.setItem('access_token', data.access_token)
-    localStorage.setItem('refresh_token', data.refresh_token)
+    setAccessToken(data.access_token)   // refresh token lives in the cookie; nothing to store
     return data
   } catch (err) {
     if (axios.isAxiosError(err) && err.response?.status === 401) {
@@ -180,10 +182,11 @@ Returned by register / login / login-with-code:
 {
   "user": { /* User */ },
   "access_token": "jwt...",
-  "refresh_token": "opaque...",
   "active_role": "student"
 }
 ```
+
+> The refresh token is **not** in the body — it is set as an HttpOnly cookie via the `Set-Cookie` response header (see [Authentication](#authentication)).
 
 ---
 
@@ -288,36 +291,28 @@ Login with identifier + one-time code.
 ---
 
 #### `POST /api/v1/auth/refresh`
-Exchange a refresh token for a new access token + **rotated** refresh token.
+Exchange the refresh-token cookie for a new access token + **rotated** refresh token.
 
-**Body**
-| Field | Type | Rules |
-|---|---|---|
-| `refresh_token` | string | required. |
+**Cookie** — `refresh_token` (sent automatically by the browser; requires `withCredentials`/`credentials: 'include'`). No request body.
 
 **200**
 ```json
-{ "access_token": "jwt...", "refresh_token": "opaque..." }
+{ "access_token": "jwt..." }
 ```
-> Save the returned `refresh_token`; the one you sent is now invalid.
+> The rotated refresh token is returned via a fresh `Set-Cookie` header; the previous one is now invalid. Nothing to read or store on the frontend.
 
 The new access token keeps the user's **last active role** — a prior `switch-role` survives the refresh rather than reverting to the default role.
 
-**400** validation error
-**401** `invalid refresh token` (invalid / revoked / expired) → session is over, re-login.
+**401** `missing refresh token` (no cookie) / `invalid refresh token` (invalid / revoked / expired) → session is over, re-login. On an invalid token the stale cookie is also cleared.
 
 ---
 
 #### `POST /api/v1/auth/logout`
-Revoke a refresh token. Idempotent.
+Revoke the current refresh token and clear its cookie. Idempotent.
 
-**Body**
-| Field | Type | Rules |
-|---|---|---|
-| `refresh_token` | string | required. |
+**Cookie** — `refresh_token` (sent automatically). No request body.
 
-**204** No Content (also returned if the token was already revoked/missing).
-**400** validation error
+**204** No Content (also returned if the cookie was absent or already revoked). The refresh cookie is expired via `Set-Cookie` either way.
 
 ---
 
@@ -386,20 +381,25 @@ Acquire an additional identity (e.g. a student who also starts teaching), then s
 
 ## Typical flows
 
+All requests must be made with credentials enabled (`withCredentials: true` / `credentials: 'include'`) so the refresh cookie flows.
+
 **New user**
-1. `POST /auth/register` → store `access_token` + `refresh_token`.
+1. `POST /auth/register` → keep `access_token` in memory (refresh cookie is set automatically).
 2. Call protected endpoints with `Authorization: Bearer <access_token>`.
 
 **Returning user (password)**
-1. `POST /auth/login` → store tokens.
+1. `POST /auth/login` → keep the `access_token` in memory.
 
 **Returning user (code)**
 1. `POST /auth/send-code` → show "code sent".
-2. `POST /auth/login/code` → store tokens.
+2. `POST /auth/login/code` → keep the `access_token` in memory.
+
+**Restoring a session after page reload** (access token lives in memory, so it's gone on reload)
+- On app start → `POST /auth/refresh` (no body). If `200`, you're logged in; if `401`, go to login.
 
 **Keeping the session alive**
-- On `401` from a protected call → `POST /auth/refresh` → save new tokens → retry the original request.
-- If `/auth/refresh` returns `401` → clear tokens and redirect to login.
+- On `401` from a protected call → `POST /auth/refresh` (no body) → save the new `access_token` → retry the original request.
+- If `/auth/refresh` returns `401` → clear the in-memory token and redirect to login.
 
 **Dual-role user**
 - Already has the role: `POST /auth/switch-role`, then replace the stored access token.

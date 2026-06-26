@@ -3,6 +3,7 @@ package user
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -12,14 +13,52 @@ import (
 	"github.com/darwish/tsz-go/internal/session"
 )
 
+const (
+	// refreshCookieName is the cookie that carries the refresh token. It is
+	// delivered HttpOnly so browser JS can never read it (an XSS can't exfiltrate
+	// the long-lived credential); the access token still travels in the JSON body
+	// and is sent back via the Authorization header.
+	refreshCookieName = "refresh_token"
+	// refreshCookiePath scopes the cookie to the auth endpoints that actually need
+	// it (refresh + logout). Ordinary API calls never carry it, shrinking both the
+	// CSRF surface and accidental exposure.
+	refreshCookiePath = "/api/v1/auth"
+)
+
+// CookieConfig controls how the refresh-token cookie is emitted.
+type CookieConfig struct {
+	// Secure restricts the cookie to HTTPS. Must be false for local http dev
+	// (browsers drop Secure cookies on http) and true in production.
+	Secure bool
+	// MaxAge is the cookie lifetime; mirrors the refresh-token TTL so the cookie
+	// expires together with the token it carries.
+	MaxAge time.Duration
+}
+
 // Handler adapts HTTP requests to the Service. It owns request/response shapes
 // and validation; all business rules live in the Service.
 type Handler struct {
-	svc *Service
+	svc    *Service
+	cookie CookieConfig
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, cookie CookieConfig) *Handler {
+	return &Handler{svc: svc, cookie: cookie}
+}
+
+// setRefreshCookie writes the refresh token as an HttpOnly, SameSite=Strict
+// cookie. Strict keeps it off cross-site requests, which (together with the
+// path scoping) defends the refresh/logout endpoints against CSRF.
+func (h *Handler) setRefreshCookie(c *gin.Context, token string) {
+	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetCookie(refreshCookieName, token, int(h.cookie.MaxAge.Seconds()), refreshCookiePath, "", h.cookie.Secure, true)
+}
+
+// clearRefreshCookie expires the refresh cookie (MaxAge<0 deletes it). Used on
+// logout and whenever a presented refresh token turns out to be invalid.
+func (h *Handler) clearRefreshCookie(c *gin.Context) {
+	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetCookie(refreshCookieName, "", -1, refreshCookiePath, "", h.cookie.Secure, true)
 }
 
 type registerRequest struct {
@@ -31,12 +70,12 @@ type registerRequest struct {
 }
 
 // authResponse is the unified login/register payload: the user plus a short-lived
-// access token and a long-lived refresh token (used against /auth/refresh).
+// access token. The refresh token is NOT in the body — it is delivered out of
+// band as an HttpOnly cookie (see setRefreshCookie) so JS can't touch it.
 type authResponse struct {
-	User         *User  `json:"user"`
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ActiveRole   string `json:"active_role"`
+	User        *User  `json:"user"`
+	AccessToken string `json:"access_token"`
+	ActiveRole  string `json:"active_role"`
 }
 
 func (h *Handler) Register(c *gin.Context) {
@@ -59,7 +98,8 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, authResponse{User: u, AccessToken: access, RefreshToken: refresh, ActiveRole: req.Role})
+	h.setRefreshCookie(c, refresh)
+	c.JSON(http.StatusCreated, authResponse{User: u, AccessToken: access, ActiveRole: req.Role})
 }
 
 type loginRequest struct {
@@ -85,7 +125,8 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, RefreshToken: refresh, ActiveRole: string(activeRole(u))})
+	h.setRefreshCookie(c, refresh)
+	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, ActiveRole: string(activeRole(u))})
 }
 
 type sendCodeRequest struct {
@@ -136,25 +177,24 @@ func (h *Handler) LoginCode(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, RefreshToken: refresh, ActiveRole: string(activeRole(u))})
+	h.setRefreshCookie(c, refresh)
+	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, ActiveRole: string(activeRole(u))})
 }
 
-type refreshRequest struct {
-	RefreshToken string `json:"refresh_token" binding:"required"`
-}
-
-// Refresh exchanges a valid refresh token for a new access token and a rotated
-// refresh token. An invalid/revoked/expired refresh token → 401.
+// Refresh exchanges the refresh-token cookie for a new access token and a rotated
+// refresh token (set back as a fresh cookie). A missing cookie or an
+// invalid/revoked/expired token → 401, and a stale cookie is cleared.
 func (h *Handler) Refresh(c *gin.Context) {
-	var req refreshRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	token, err := c.Cookie(refreshCookieName)
+	if err != nil || token == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing refresh token"})
 		return
 	}
 
-	access, refresh, err := h.svc.Refresh(c.Request.Context(), req.RefreshToken)
+	access, refresh, err := h.svc.Refresh(c.Request.Context(), token)
 	switch {
 	case errors.Is(err, session.ErrInvalidRefreshToken):
+		h.clearRefreshCookie(c)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid refresh token"})
 		return
 	case err != nil:
@@ -162,22 +202,21 @@ func (h *Handler) Refresh(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"access_token": access, "refresh_token": refresh})
+	h.setRefreshCookie(c, refresh)
+	c.JSON(http.StatusOK, gin.H{"access_token": access})
 }
 
-// Logout revokes a refresh token. Idempotent: a missing/already-revoked token
-// still returns 204.
+// Logout revokes the refresh token carried by the cookie and clears the cookie.
+// Idempotent: a missing/already-revoked token still returns 204.
 func (h *Handler) Logout(c *gin.Context) {
-	var req refreshRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+	token, _ := c.Cookie(refreshCookieName)
+	if token != "" {
+		if err := h.svc.Logout(c.Request.Context(), token); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
 	}
-
-	if err := h.svc.Logout(c.Request.Context(), req.RefreshToken); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
+	h.clearRefreshCookie(c)
 
 	// 204 has no body; flush the status now so it's emitted even with no write.
 	c.Status(http.StatusNoContent)

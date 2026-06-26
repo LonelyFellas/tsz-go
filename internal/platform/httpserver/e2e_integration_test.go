@@ -49,10 +49,23 @@ func buildRealRouter(t *testing.T) (http.Handler, *otp.MockSender) {
 	sessionSvc := session.NewService(session.NewRepository(pool), time.Hour)
 	repo := user.NewRepository(pool)
 	svc := user.NewService(repo, tm, otpSvc, sessionSvc)
-	return NewRouter(Deps{TokenManager: tm, UserHandler: user.NewHandler(svc)}), sender
+	return NewRouter(Deps{TokenManager: tm, UserHandler: user.NewHandler(svc, user.CookieConfig{MaxAge: time.Hour})}), sender
 }
 
-// loginTokens logs in by password and returns the access and refresh tokens.
+// refreshCookieFrom pulls the refresh_token cookie value out of a response. The
+// refresh token rides in an HttpOnly cookie, not the JSON body.
+func refreshCookieFrom(w *httptest.ResponseRecorder) string {
+	res := http.Response{Header: w.Header()}
+	for _, ck := range res.Cookies() {
+		if ck.Name == "refresh_token" {
+			return ck.Value
+		}
+	}
+	return ""
+}
+
+// loginTokens logs in by password and returns the access token (body) and the
+// refresh token (Set-Cookie).
 func loginTokens(t *testing.T, r http.Handler, identifier, password string) (access, refresh string) {
 	t.Helper()
 	w := req(t, r, http.MethodPost, "/api/v1/auth/login",
@@ -61,18 +74,20 @@ func loginTokens(t *testing.T, r http.Handler, identifier, password string) (acc
 		t.Fatalf("login status = %d, body=%s", w.Code, w.Body)
 	}
 	var resp struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
+		AccessToken string `json:"access_token"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode login: %v", err)
 	}
-	return resp.AccessToken, resp.RefreshToken
+	return resp.AccessToken, refreshCookieFrom(w)
 }
 
+// refreshTokens calls /auth/refresh with the refresh token presented as a cookie
+// (as a browser would), and returns the recorder so the caller can read the new
+// access token (body) and rotated refresh token (Set-Cookie).
 func refreshTokens(t *testing.T, r http.Handler, refresh string) *httptest.ResponseRecorder {
 	t.Helper()
-	return req(t, r, http.MethodPost, "/api/v1/auth/refresh", `{"refresh_token":"`+refresh+`"}`, "")
+	return reqCookie(t, r, http.MethodPost, "/api/v1/auth/refresh", "", refresh)
 }
 
 // TestE2E_RefreshAndSingleDevice covers the refresh-token rotation and strict
@@ -96,14 +111,14 @@ func TestE2E_RefreshAndSingleDevice(t *testing.T) {
 		t.Fatalf("refresh status = %d, body=%s", w.Code, w.Body)
 	}
 	var rotated struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
+		AccessToken string `json:"access_token"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &rotated); err != nil {
 		t.Fatalf("decode refresh: %v", err)
 	}
-	if rotated.AccessToken == "" || rotated.RefreshToken == "" {
-		t.Fatal("refresh response missing tokens")
+	rotatedRefresh := refreshCookieFrom(w)
+	if rotated.AccessToken == "" || rotatedRefresh == "" {
+		t.Fatal("refresh response missing access token (body) or refresh cookie")
 	}
 	// the new access token works against an authed route
 	if w := req(t, r, http.MethodGet, "/api/v1/me", "", rotated.AccessToken); w.Code != http.StatusOK {
@@ -114,7 +129,7 @@ func TestE2E_RefreshAndSingleDevice(t *testing.T) {
 		t.Fatalf("replayed old refresh status = %d, want 401", w.Code)
 	}
 	// the rotated refresh token is the live one
-	refresh2 := rotated.RefreshToken
+	refresh2 := rotatedRefresh
 
 	// ---- strict single-device ----
 	// "device 2" logs in; this must revoke device 1's (rotated) refresh token
@@ -127,21 +142,18 @@ func TestE2E_RefreshAndSingleDevice(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("device-2 refresh status = %d, want 200", w.Code)
 	}
-	var deviceBRotated struct {
-		RefreshToken string `json:"refresh_token"`
-	}
-	_ = json.Unmarshal(w.Body.Bytes(), &deviceBRotated)
+	deviceBRefresh := refreshCookieFrom(w)
 
 	// ---- logout ----
 	// logout device 2 → 204; afterwards its refresh token is dead
-	if w := req(t, r, http.MethodPost, "/api/v1/auth/logout", `{"refresh_token":"`+deviceBRotated.RefreshToken+`"}`, ""); w.Code != http.StatusNoContent {
+	if w := reqCookie(t, r, http.MethodPost, "/api/v1/auth/logout", "", deviceBRefresh); w.Code != http.StatusNoContent {
 		t.Fatalf("logout status = %d, want 204", w.Code)
 	}
-	if w := refreshTokens(t, r, deviceBRotated.RefreshToken); w.Code != http.StatusUnauthorized {
+	if w := refreshTokens(t, r, deviceBRefresh); w.Code != http.StatusUnauthorized {
 		t.Fatalf("post-logout refresh status = %d, want 401", w.Code)
 	}
 	// logout is idempotent
-	if w := req(t, r, http.MethodPost, "/api/v1/auth/logout", `{"refresh_token":"`+deviceBRotated.RefreshToken+`"}`, ""); w.Code != http.StatusNoContent {
+	if w := reqCookie(t, r, http.MethodPost, "/api/v1/auth/logout", "", deviceBRefresh); w.Code != http.StatusNoContent {
 		t.Fatalf("idempotent logout status = %d, want 204", w.Code)
 	}
 }
@@ -158,6 +170,26 @@ func req(t *testing.T, r http.Handler, method, path, body, bearer string) *httpt
 	httpReq.Header.Set("Content-Type", "application/json")
 	if bearer != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httpReq)
+	return w
+}
+
+// reqCookie is like req but presents the refresh token as a cookie (as a browser
+// would), used for the cookie-based /auth/refresh and /auth/logout endpoints.
+func reqCookie(t *testing.T, r http.Handler, method, path, body, refresh string) *httptest.ResponseRecorder {
+	t.Helper()
+	var rdr *bytes.Buffer
+	if body != "" {
+		rdr = bytes.NewBufferString(body)
+	} else {
+		rdr = bytes.NewBuffer(nil)
+	}
+	httpReq := httptest.NewRequest(method, path, rdr)
+	httpReq.Header.Set("Content-Type", "application/json")
+	if refresh != "" {
+		httpReq.AddCookie(&http.Cookie{Name: "refresh_token", Value: refresh})
 	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httpReq)
@@ -181,17 +213,20 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 		t.Fatalf("register status = %d, body=%s", w.Code, w.Body)
 	}
 	var reg struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		User         struct {
+		AccessToken string `json:"access_token"`
+		User        struct {
 			ID string `json:"id"`
 		} `json:"user"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &reg); err != nil {
 		t.Fatalf("decode register: %v", err)
 	}
-	if reg.AccessToken == "" || reg.RefreshToken == "" || reg.User.ID == "" {
-		t.Fatal("register response missing access/refresh token or user id")
+	if reg.AccessToken == "" || reg.User.ID == "" {
+		t.Fatal("register response missing access token or user id")
+	}
+	// the refresh token must arrive as an HttpOnly cookie, not in the body
+	if refreshCookieFrom(w) == "" {
+		t.Fatal("register response missing refresh_token cookie")
 	}
 
 	// duplicate register → 409

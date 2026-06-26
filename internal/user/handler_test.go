@@ -26,7 +26,7 @@ func newTestHandler() (*Handler, *fakeStore, *fakeCodes, *fakeSessions, *auth.To
 	codes := newFakeCodes()
 	sessions := newFakeSessions()
 	tm := auth.NewTokenManager("test-secret", time.Hour)
-	return NewHandler(NewService(store, tm, codes, sessions)), store, codes, sessions, tm
+	return NewHandler(NewService(store, tm, codes, sessions), CookieConfig{MaxAge: time.Hour}), store, codes, sessions, tm
 }
 
 func doJSON(t *testing.T, h gin.HandlerFunc, body string) *httptest.ResponseRecorder {
@@ -37,6 +37,31 @@ func doJSON(t *testing.T, h gin.HandlerFunc, body string) *httptest.ResponseReco
 	c.Request.Header.Set("Content-Type", "application/json")
 	h(c)
 	return w
+}
+
+// doCookie drives a handler with the refresh token presented as a cookie, the
+// way the refresh/logout endpoints now read it.
+func doCookie(t *testing.T, h gin.HandlerFunc, refresh string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+	if refresh != "" {
+		c.Request.AddCookie(&http.Cookie{Name: refreshCookieName, Value: refresh})
+	}
+	h(c)
+	return w
+}
+
+// refreshCookieValue extracts the refresh_token cookie set on a response.
+func refreshCookieValue(w *httptest.ResponseRecorder) string {
+	res := http.Response{Header: w.Header()}
+	for _, ck := range res.Cookies() {
+		if ck.Name == refreshCookieName {
+			return ck.Value
+		}
+	}
+	return ""
 }
 
 func decode(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
@@ -100,9 +125,12 @@ func TestHandler_Register_SuccessShape(t *testing.T) {
 	if _, err := tm.Parse(access); err != nil {
 		t.Errorf("returned access token invalid: %v", err)
 	}
-	// a refresh token must be returned alongside it
-	if refresh, _ := m["refresh_token"].(string); refresh == "" {
-		t.Error("response missing refresh_token")
+	// the refresh token must NOT be in the body — it rides in an HttpOnly cookie
+	if _, ok := m["refresh_token"]; ok {
+		t.Error("refresh_token leaked into response body; it must be cookie-only")
+	}
+	if refreshCookieValue(w) == "" {
+		t.Error("response missing refresh_token cookie")
 	}
 
 	// user object must NOT leak the password hash
@@ -112,6 +140,42 @@ func TestHandler_Register_SuccessShape(t *testing.T) {
 	user, _ := m["user"].(map[string]any)
 	if user["email"] != "a@b.com" {
 		t.Errorf("user.email = %v", user["email"])
+	}
+}
+
+// TestHandler_RefreshCookieAttributes locks in the security-critical cookie
+// flags: HttpOnly (XSS can't read it), SameSite=Strict (CSRF defense), and the
+// auth-scoped path. Secure tracks the configured value.
+func TestHandler_RefreshCookieAttributes(t *testing.T) {
+	store := newFakeStore()
+	tm := auth.NewTokenManager("test-secret", time.Hour)
+	h := NewHandler(NewService(store, tm, newFakeCodes(), newFakeSessions()), CookieConfig{Secure: true, MaxAge: time.Hour})
+
+	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"A","role":"student"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register status = %d", w.Code)
+	}
+
+	var ck *http.Cookie
+	for _, c := range (&http.Response{Header: w.Header()}).Cookies() {
+		if c.Name == refreshCookieName {
+			ck = c
+		}
+	}
+	if ck == nil {
+		t.Fatal("no refresh_token cookie set")
+	}
+	if !ck.HttpOnly {
+		t.Error("refresh cookie must be HttpOnly")
+	}
+	if !ck.Secure {
+		t.Error("refresh cookie must be Secure when configured Secure=true")
+	}
+	if ck.SameSite != http.SameSiteStrictMode {
+		t.Errorf("refresh cookie SameSite = %v, want Strict", ck.SameSite)
+	}
+	if ck.Path != refreshCookiePath {
+		t.Errorf("refresh cookie Path = %q, want %q", ck.Path, refreshCookiePath)
 	}
 }
 
@@ -196,16 +260,16 @@ func TestHandler_SendCode_RateLimited(t *testing.T) {
 }
 
 // registerAndGetRefresh seeds a user via Register and returns the refresh token
-// from the response.
+// from the response cookie.
 func registerAndGetRefresh(t *testing.T, h *Handler) string {
 	t.Helper()
 	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("seed register status = %d", w.Code)
 	}
-	refresh, _ := decode(t, w)["refresh_token"].(string)
+	refresh := refreshCookieValue(w)
 	if refresh == "" {
-		t.Fatal("seed register did not return a refresh token")
+		t.Fatal("seed register did not set a refresh token cookie")
 	}
 	return refresh
 }
@@ -214,31 +278,35 @@ func TestHandler_Refresh(t *testing.T) {
 	h, _, _, _, _ := newTestHandler()
 	refresh := registerAndGetRefresh(t, h)
 
-	// rotate the refresh token → 200 with a fresh access + rotated refresh
-	w := doJSON(t, h.Refresh, `{"refresh_token":"`+refresh+`"}`)
+	// rotate the refresh token → 200 with a fresh access (body) + rotated refresh
+	// (cookie)
+	w := doCookie(t, h.Refresh, refresh)
 	if w.Code != http.StatusOK {
 		t.Fatalf("refresh status = %d, want 200 (body: %s)", w.Code, w.Body)
 	}
 	m := decode(t, w)
-	if m["access_token"] == "" || m["refresh_token"] == "" {
-		t.Errorf("refresh response missing tokens: %v", m)
+	if m["access_token"] == "" {
+		t.Errorf("refresh response missing access_token: %v", m)
 	}
-	rotated, _ := m["refresh_token"].(string)
-	if rotated == refresh {
-		t.Error("refresh token was not rotated")
+	if _, ok := m["refresh_token"]; ok {
+		t.Error("refresh_token leaked into response body; it must be cookie-only")
+	}
+	rotated := refreshCookieValue(w)
+	if rotated == "" || rotated == refresh {
+		t.Error("refresh token cookie was not rotated")
 	}
 
 	// replaying the old refresh token → 401
-	if w := doJSON(t, h.Refresh, `{"refresh_token":"`+refresh+`"}`); w.Code != http.StatusUnauthorized {
+	if w := doCookie(t, h.Refresh, refresh); w.Code != http.StatusUnauthorized {
 		t.Fatalf("replayed refresh status = %d, want 401", w.Code)
 	}
 	// unknown refresh token → 401
-	if w := doJSON(t, h.Refresh, `{"refresh_token":"nope"}`); w.Code != http.StatusUnauthorized {
+	if w := doCookie(t, h.Refresh, "nope"); w.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown refresh status = %d, want 401", w.Code)
 	}
-	// missing field → 400
-	if w := doJSON(t, h.Refresh, `{}`); w.Code != http.StatusBadRequest {
-		t.Fatalf("missing refresh_token status = %d, want 400", w.Code)
+	// no cookie → 401
+	if w := doCookie(t, h.Refresh, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing refresh cookie status = %d, want 401", w.Code)
 	}
 }
 
@@ -247,19 +315,19 @@ func TestHandler_Logout(t *testing.T) {
 	refresh := registerAndGetRefresh(t, h)
 
 	// logout → 204, and the refresh token is dead afterwards
-	if w := doJSON(t, h.Logout, `{"refresh_token":"`+refresh+`"}`); w.Code != http.StatusNoContent {
+	if w := doCookie(t, h.Logout, refresh); w.Code != http.StatusNoContent {
 		t.Fatalf("logout status = %d, want 204", w.Code)
 	}
-	if w := doJSON(t, h.Refresh, `{"refresh_token":"`+refresh+`"}`); w.Code != http.StatusUnauthorized {
+	if w := doCookie(t, h.Refresh, refresh); w.Code != http.StatusUnauthorized {
 		t.Fatalf("post-logout refresh status = %d, want 401", w.Code)
 	}
 	// logout is idempotent: revoking again (or an unknown token) still 204
-	if w := doJSON(t, h.Logout, `{"refresh_token":"`+refresh+`"}`); w.Code != http.StatusNoContent {
+	if w := doCookie(t, h.Logout, refresh); w.Code != http.StatusNoContent {
 		t.Fatalf("idempotent logout status = %d, want 204", w.Code)
 	}
-	// missing field → 400
-	if w := doJSON(t, h.Logout, `{}`); w.Code != http.StatusBadRequest {
-		t.Fatalf("missing refresh_token status = %d, want 400", w.Code)
+	// no cookie → still 204 (idempotent)
+	if w := doCookie(t, h.Logout, ""); w.Code != http.StatusNoContent {
+		t.Fatalf("logout without cookie status = %d, want 204", w.Code)
 	}
 }
 
@@ -273,7 +341,7 @@ func TestHandler_LogoutAll(t *testing.T) {
 		t.Fatalf("seed register status = %d", w.Code)
 	}
 	body := decode(t, w)
-	refresh, _ := body["refresh_token"].(string)
+	refresh := refreshCookieValue(w)
 	user, _ := body["user"].(map[string]any)
 	userID, err := uuid.Parse(user["id"].(string))
 	if err != nil {
@@ -284,7 +352,7 @@ func TestHandler_LogoutAll(t *testing.T) {
 	if w := doJSONAuthed(t, h.LogoutAll, `{}`, userID); w.Code != http.StatusNoContent {
 		t.Fatalf("logout-all status = %d, want 204", w.Code)
 	}
-	if w := doJSON(t, h.Refresh, `{"refresh_token":"`+refresh+`"}`); w.Code != http.StatusUnauthorized {
+	if w := doCookie(t, h.Refresh, refresh); w.Code != http.StatusUnauthorized {
 		t.Fatalf("post-logout-all refresh status = %d, want 401", w.Code)
 	}
 	// idempotent: a user with no active sessions still returns 204
