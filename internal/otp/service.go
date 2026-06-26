@@ -23,6 +23,11 @@ var (
 // codeDigits is the length of a generated numeric code.
 const codeDigits = 6
 
+// maxVerifyAttempts caps wrong guesses against a single code before it is locked
+// out. With a 6-digit code this keeps the odds of a successful online guess
+// negligible (≤ maxVerifyAttempts / 1e6) regardless of how long the code is valid.
+const maxVerifyAttempts = 5
+
 // Code is a stored one-time code.
 type Code struct {
 	ID         uuid.UUID
@@ -32,6 +37,7 @@ type Code struct {
 	Code       string
 	ExpiresAt  time.Time
 	ConsumedAt *time.Time
+	Attempts   int
 	CreatedAt  time.Time
 }
 
@@ -41,6 +47,7 @@ type Store interface {
 	Save(ctx context.Context, c *Code) error
 	LatestUnconsumed(ctx context.Context, target, purpose string) (*Code, error)
 	MarkConsumed(ctx context.Context, id uuid.UUID) error
+	IncrementAttempts(ctx context.Context, id uuid.UUID) error
 }
 
 // Service generates, stores, sends and verifies one-time codes.
@@ -94,8 +101,17 @@ func (s *Service) Verify(ctx context.Context, target, purpose, code string) erro
 	if time.Now().After(c.ExpiresAt) {
 		return ErrInvalidCode
 	}
+	// Too many wrong guesses already: the code is locked until it expires (or is
+	// superseded by a fresh one). This is what bounds online brute-forcing.
+	if c.Attempts >= maxVerifyAttempts {
+		return ErrInvalidCode
+	}
 	// constant-time compare to avoid leaking the code via timing
 	if subtle.ConstantTimeCompare([]byte(c.Code), []byte(code)) != 1 {
+		// Count the failed guess so repeated attempts eventually lock the code.
+		if err := s.store.IncrementAttempts(ctx, c.ID); err != nil {
+			return fmt.Errorf("record failed attempt: %w", err)
+		}
 		return ErrInvalidCode
 	}
 
