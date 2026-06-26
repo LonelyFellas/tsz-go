@@ -38,12 +38,26 @@ type CookieConfig struct {
 // Handler adapts HTTP requests to the Service. It owns request/response shapes
 // and validation; all business rules live in the Service.
 type Handler struct {
-	svc    *Service
-	cookie CookieConfig
+	svc              *Service
+	cookie           CookieConfig
+	accessTokenTTL   time.Duration
+	refreshTokenTTL  time.Duration
 }
 
-func NewHandler(svc *Service, cookie CookieConfig) *Handler {
-	return &Handler{svc: svc, cookie: cookie}
+func NewHandler(svc *Service, cookie CookieConfig, accessTokenTTL, refreshTokenTTL time.Duration) *Handler {
+	return &Handler{svc: svc, cookie: cookie, accessTokenTTL: accessTokenTTL, refreshTokenTTL: refreshTokenTTL}
+}
+
+// newAuthResponse builds an authResponse with token expiry fields populated.
+func (h *Handler) newAuthResponse(u *User, accessToken, activeRole string) authResponse {
+	now := time.Now()
+	return authResponse{
+		User:                  u,
+		AccessToken:           accessToken,
+		ActiveRole:            activeRole,
+		ExpiresIn:             int64(h.accessTokenTTL.Seconds()),
+		RefreshTokenExpiresAt: now.Add(h.refreshTokenTTL).Unix(),
+	}
 }
 
 // setRefreshCookie writes the refresh token as an HttpOnly, SameSite=Strict
@@ -73,9 +87,11 @@ type registerRequest struct {
 // access token. The refresh token is NOT in the body — it is delivered out of
 // band as an HttpOnly cookie (see setRefreshCookie) so JS can't touch it.
 type authResponse struct {
-	User        *User  `json:"user"`
-	AccessToken string `json:"access_token"`
-	ActiveRole  string `json:"active_role"`
+	User                   *User  `json:"user"`
+	AccessToken            string `json:"access_token"`
+	ActiveRole             string `json:"active_role"`
+	ExpiresIn              int64  `json:"expires_in"`               // access token TTL in seconds
+	RefreshTokenExpiresAt  int64  `json:"refresh_token_expires_at"` // Unix timestamp (seconds)
 }
 
 func (h *Handler) Register(c *gin.Context) {
@@ -99,7 +115,7 @@ func (h *Handler) Register(c *gin.Context) {
 	}
 
 	h.setRefreshCookie(c, refresh)
-	c.JSON(http.StatusCreated, authResponse{User: u, AccessToken: access, ActiveRole: req.Role})
+	c.JSON(http.StatusCreated, h.newAuthResponse(u, access, req.Role))
 }
 
 type loginRequest struct {
@@ -126,7 +142,7 @@ func (h *Handler) Login(c *gin.Context) {
 	}
 
 	h.setRefreshCookie(c, refresh)
-	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, ActiveRole: string(activeRole(u))})
+	c.JSON(http.StatusOK, h.newAuthResponse(u, access, string(activeRole(u))))
 }
 
 type sendCodeRequest struct {
@@ -178,7 +194,7 @@ func (h *Handler) LoginCode(c *gin.Context) {
 	}
 
 	h.setRefreshCookie(c, refresh)
-	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, ActiveRole: string(activeRole(u))})
+	c.JSON(http.StatusOK, h.newAuthResponse(u, access, string(activeRole(u))))
 }
 
 // Refresh exchanges the refresh-token cookie for a new access token and a rotated
@@ -203,7 +219,11 @@ func (h *Handler) Refresh(c *gin.Context) {
 	}
 
 	h.setRefreshCookie(c, refresh)
-	c.JSON(http.StatusOK, gin.H{"access_token": access})
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":             access,
+		"expires_in":               int64(h.accessTokenTTL.Seconds()),
+		"refresh_token_expires_at": time.Now().Add(h.refreshTokenTTL).Unix(),
+	})
 }
 
 // Logout revokes the refresh token carried by the cookie and clears the cookie.

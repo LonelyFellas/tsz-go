@@ -71,7 +71,7 @@ func run() error {
 	userHandler := user.NewHandler(userService, user.CookieConfig{
 		Secure: cfg.Env != "development",
 		MaxAge: cfg.RefreshTokenTTL,
-	})
+	}, cfg.JWTTTL, cfg.RefreshTokenTTL)
 
 	router := httpserver.NewRouter(httpserver.Deps{
 		TokenManager: tokenManager,
