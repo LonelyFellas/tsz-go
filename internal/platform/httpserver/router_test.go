@@ -16,7 +16,7 @@ import (
 func newTestRouter() http.Handler {
 	return NewRouter(Deps{
 		TokenManager: auth.NewTokenManager("secret", time.Hour),
-		UserHandler:  user.NewHandler(nil),
+		UserHandler:  user.NewHandler(nil, user.CookieConfig{}),
 	})
 }
 

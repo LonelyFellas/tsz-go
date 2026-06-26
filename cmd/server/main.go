@@ -66,7 +66,12 @@ func run() error {
 
 	userRepo := user.NewRepository(pool)
 	userService := user.NewService(userRepo, tokenManager, otpService, sessionService)
-	userHandler := user.NewHandler(userService)
+	// Refresh tokens ride in an HttpOnly cookie. Secure is on outside dev so the
+	// cookie is HTTPS-only in production; MaxAge mirrors the refresh-token TTL.
+	userHandler := user.NewHandler(userService, user.CookieConfig{
+		Secure: cfg.Env != "development",
+		MaxAge: cfg.RefreshTokenTTL,
+	})
 
 	router := httpserver.NewRouter(httpserver.Deps{
 		TokenManager: tokenManager,
