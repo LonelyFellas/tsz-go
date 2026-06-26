@@ -27,6 +27,9 @@ type Config struct {
 	OTPResendCooldown time.Duration
 	OTPDailyLimit     int
 	Env               string
+	// LogLevel sets the minimum slog level (debug/info/warn/error). Defaults to
+	// info; bump to debug to investigate an incident without recompiling.
+	LogLevel string
 	// AutoMigrate runs migrations on server startup. Off by default so
 	// production migrates as a separate step (see ./cmd/migrate); handy to
 	// enable locally via AUTO_MIGRATE=true.
@@ -44,6 +47,7 @@ func Load() (Config, error) {
 		OTPResendCooldown: getdur("OTP_RESEND_COOLDOWN", 60*time.Second),
 		OTPDailyLimit:     getint("OTP_DAILY_LIMIT", 10),
 		Env:               getenv("APP_ENV", "development"),
+		LogLevel:          getenv("LOG_LEVEL", "info"),
 		AutoMigrate:       getbool("AUTO_MIGRATE", false),
 	}
 

@@ -48,6 +48,14 @@ func NewHandler(svc *Service, cookie CookieConfig, accessTokenTTL, refreshTokenT
 	return &Handler{svc: svc, cookie: cookie, accessTokenTTL: accessTokenTTL, refreshTokenTTL: refreshTokenTTL}
 }
 
+// internalError attaches err to the gin context (so the request logger records
+// the real cause) and returns a generic 500. The client never sees internal
+// details; our logs always do.
+func internalError(c *gin.Context, err error) {
+	_ = c.Error(err)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+}
+
 // newAuthResponse builds an authResponse with token expiry fields populated.
 func (h *Handler) newAuthResponse(u *User, accessToken, activeRole string) authResponse {
 	now := time.Now()
@@ -110,7 +118,7 @@ func (h *Handler) Register(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
 		return
 	case err != nil:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		internalError(c, err)
 		return
 	}
 
@@ -137,7 +145,7 @@ func (h *Handler) Login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	case err != nil:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		internalError(c, err)
 		return
 	}
 
@@ -163,7 +171,7 @@ func (h *Handler) SendCode(c *gin.Context) {
 			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many code requests, try again later"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		internalError(c, err)
 		return
 	}
 
@@ -189,7 +197,7 @@ func (h *Handler) LoginCode(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	case err != nil:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		internalError(c, err)
 		return
 	}
 
@@ -214,7 +222,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid refresh token"})
 		return
 	case err != nil:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		internalError(c, err)
 		return
 	}
 
@@ -232,7 +240,7 @@ func (h *Handler) Logout(c *gin.Context) {
 	token, _ := c.Cookie(refreshCookieName)
 	if token != "" {
 		if err := h.svc.Logout(c.Request.Context(), token); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			internalError(c, err)
 			return
 		}
 	}
@@ -250,7 +258,7 @@ func (h *Handler) LogoutAll(c *gin.Context) {
 	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
 
 	if err := h.svc.LogoutAll(c.Request.Context(), userID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		internalError(c, err)
 		return
 	}
 
@@ -279,7 +287,7 @@ func (h *Handler) SwitchRole(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "user does not have this role"})
 		return
 	case err != nil:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		internalError(c, err)
 		return
 	}
 
@@ -302,7 +310,7 @@ func (h *Handler) AddRole(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "user already has this role"})
 		return
 	case err != nil:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		internalError(c, err)
 		return
 	}
 
@@ -319,7 +327,7 @@ func (h *Handler) Me(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	case err != nil:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		internalError(c, err)
 		return
 	}
 

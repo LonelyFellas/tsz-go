@@ -29,6 +29,12 @@ func ChannelFor(target string) Channel {
 
 // Sender delivers a code to a target. Implementations are the only place that
 // know about a concrete SMS/email provider.
+//
+// Logging note for real implementations: never log code (it's a live
+// credential) and never log target verbatim — phone numbers and emails are PII.
+// If you must log for diagnostics, mask the target (e.g. "138****1234",
+// "a***@example.com"). The MockSender below logs both on purpose, but only
+// because it is dev/test-only and sends nothing externally.
 type Sender interface {
 	Send(ctx context.Context, channel Channel, target, code string) error
 }

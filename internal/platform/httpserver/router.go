@@ -19,7 +19,9 @@ type Deps struct {
 
 func NewRouter(deps Deps) *gin.Engine {
 	r := gin.New()
-	r.Use(gin.Recovery(), RequestLogger())
+	// RequestID first so Recovery and RequestLogger can stamp the ID; Recovery
+	// before RequestLogger so a panic still produces a request log line.
+	r.Use(RequestID(), Recovery(), RequestLogger())
 
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})

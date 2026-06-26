@@ -6,14 +6,14 @@
 package main
 
 import (
-	"log/slog"
 	"os"
 
 	"github.com/darwish/tsz-go/internal/platform/database"
+	applog "github.com/darwish/tsz-go/internal/platform/log"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := applog.New(os.Getenv("LOG_LEVEL"))
 
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {

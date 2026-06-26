@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/darwish/tsz-go/internal/auth"
+	applog "github.com/darwish/tsz-go/internal/platform/log"
 )
 
 func init() { gin.SetMode(gin.TestMode) }
@@ -150,5 +152,133 @@ func TestRequestLogger(t *testing.T) {
 	}
 	if _, ok := logged["ip"]; !ok {
 		t.Error("log line missing ip")
+	}
+}
+
+// A 500 must be logged at Error with the cause a handler attached via c.Error,
+// so failures are never silently swallowed.
+func TestRequestLogger_LogsErrorCause(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	w := httptest.NewRecorder()
+	c, engine := gin.CreateTestContext(w)
+	engine.Use(RequestLogger())
+	engine.GET("/boom", func(c *gin.Context) {
+		_ = c.Error(errors.New("db exploded"))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+	})
+
+	c.Request = httptest.NewRequest(http.MethodGet, "/boom", nil)
+	engine.ServeHTTP(w, c.Request)
+
+	var logged map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &logged); err != nil {
+		t.Fatalf("decode log line %q: %v", buf.String(), err)
+	}
+	if logged["level"] != "ERROR" {
+		t.Errorf("level = %v, want ERROR", logged["level"])
+	}
+	if errStr, _ := logged["err"].(string); errStr == "" || !bytes.Contains([]byte(errStr), []byte("db exploded")) {
+		t.Errorf("err = %v, want it to contain the attached cause", logged["err"])
+	}
+}
+
+// Liveness probes must not produce log lines.
+func TestRequestLogger_SkipsHealthz(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	w := httptest.NewRecorder()
+	c, engine := gin.CreateTestContext(w)
+	engine.Use(RequestLogger())
+	engine.GET("/healthz", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	c.Request = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	engine.ServeHTTP(w, c.Request)
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no log output for /healthz, got %q", buf.String())
+	}
+}
+
+func TestRequestID(t *testing.T) {
+	t.Run("generates when absent and exposes in context + header", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, engine := gin.CreateTestContext(w)
+
+		var gotID string
+		engine.Use(RequestID())
+		engine.GET("/x", func(c *gin.Context) {
+			gotID = applog.RequestIDFromContext(c.Request.Context())
+			c.Status(http.StatusOK)
+		})
+
+		c.Request = httptest.NewRequest(http.MethodGet, "/x", nil)
+		engine.ServeHTTP(w, c.Request)
+
+		if gotID == "" {
+			t.Fatal("request ID not propagated into context")
+		}
+		if h := w.Header().Get(requestIDHeader); h != gotID {
+			t.Errorf("response header %s = %q, want %q", requestIDHeader, h, gotID)
+		}
+	})
+
+	t.Run("honors inbound header", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		c, engine := gin.CreateTestContext(w)
+
+		var gotID string
+		engine.Use(RequestID())
+		engine.GET("/x", func(c *gin.Context) {
+			gotID = applog.RequestIDFromContext(c.Request.Context())
+			c.Status(http.StatusOK)
+		})
+
+		c.Request = httptest.NewRequest(http.MethodGet, "/x", nil)
+		c.Request.Header.Set(requestIDHeader, "upstream-id")
+		engine.ServeHTTP(w, c.Request)
+
+		if gotID != "upstream-id" {
+			t.Errorf("request ID = %q, want upstream-id", gotID)
+		}
+	})
+}
+
+func TestRecovery(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	w := httptest.NewRecorder()
+	c, engine := gin.CreateTestContext(w)
+	engine.Use(Recovery())
+	engine.GET("/panic", func(c *gin.Context) { panic("kaboom") })
+
+	c.Request = httptest.NewRequest(http.MethodGet, "/panic", nil)
+	engine.ServeHTTP(w, c.Request)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
+	}
+
+	var logged map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &logged); err != nil {
+		t.Fatalf("decode log line %q: %v", buf.String(), err)
+	}
+	if logged["msg"] != "panic recovered" {
+		t.Errorf("msg = %v, want 'panic recovered'", logged["msg"])
+	}
+	if logged["level"] != "ERROR" {
+		t.Errorf("level = %v, want ERROR", logged["level"])
+	}
+	if _, ok := logged["stack"]; !ok {
+		t.Error("panic log missing stack trace")
 	}
 }
