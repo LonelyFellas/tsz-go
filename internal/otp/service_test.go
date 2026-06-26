@@ -59,6 +59,15 @@ func (f *fakeStore) MarkConsumed(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (f *fakeStore) IncrementAttempts(_ context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c, ok := f.byID[id]; ok {
+		c.Attempts++
+	}
+	return nil
+}
+
 func TestChannelFor(t *testing.T) {
 	if ChannelFor("a@b.com") != ChannelEmail {
 		t.Error("email target should map to email channel")
@@ -94,6 +103,40 @@ func TestService_RequestAndVerify(t *testing.T) {
 	// and is single-use afterwards
 	if err := svc.Verify(ctx, "13800138000", "login", code); !errors.Is(err, ErrInvalidCode) {
 		t.Errorf("reused code err = %v, want ErrInvalidCode", err)
+	}
+}
+
+// A code must lock after maxVerifyAttempts wrong guesses — even the correct code
+// is then rejected — so a 6-digit code can't be brute-forced within its TTL.
+func TestService_Verify_AttemptLimit(t *testing.T) {
+	store := newFakeStore()
+	sender := NewMockSender()
+	svc := NewService(store, sender, time.Minute)
+	ctx := context.Background()
+
+	if err := svc.RequestCode(ctx, "13800138000", "login"); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	code := sender.LastCode("13800138000")
+
+	// exhaust the allowed wrong guesses
+	for i := 0; i < maxVerifyAttempts; i++ {
+		if err := svc.Verify(ctx, "13800138000", "login", "000000"); !errors.Is(err, ErrInvalidCode) {
+			t.Fatalf("wrong guess %d err = %v, want ErrInvalidCode", i+1, err)
+		}
+	}
+
+	// the code is now locked: the correct code no longer works
+	if err := svc.Verify(ctx, "13800138000", "login", code); !errors.Is(err, ErrInvalidCode) {
+		t.Errorf("correct code after lockout err = %v, want ErrInvalidCode", err)
+	}
+
+	// a freshly requested code is accepted again (lockout is per-code)
+	if err := svc.RequestCode(ctx, "13800138000", "login"); err != nil {
+		t.Fatalf("re-request: %v", err)
+	}
+	if err := svc.Verify(ctx, "13800138000", "login", sender.LastCode("13800138000")); err != nil {
+		t.Errorf("fresh code verify: %v", err)
 	}
 }
 
