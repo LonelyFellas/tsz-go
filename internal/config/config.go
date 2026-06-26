@@ -26,7 +26,14 @@ type Config struct {
 	// 10). Together they bound SMS/email cost and abuse. 0 disables either limit.
 	OTPResendCooldown time.Duration
 	OTPDailyLimit     int
-	Env               string
+	// AuthRateLimitPerMin caps requests per client IP to the public auth
+	// endpoints over a rolling minute (default 30); AuthRateBurst is the
+	// short-burst allowance on top (default 10). This is an IP-level layer over
+	// the per-target OTP limits, blunting credential stuffing and a single host
+	// cycling identifiers. 0 (or less) for AuthRateLimitPerMin disables it.
+	AuthRateLimitPerMin int
+	AuthRateBurst       int
+	Env                 string
 	// LogLevel sets the minimum slog level (debug/info/warn/error). Defaults to
 	// info; bump to debug to investigate an incident without recompiling.
 	LogLevel string
@@ -42,18 +49,20 @@ type Config struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		Port:              getenv("PORT", "8080"),
-		DatabaseURL:       os.Getenv("DATABASE_URL"),
-		JWTSecret:         os.Getenv("JWT_SECRET"),
-		JWTTTL:            getdur("JWT_TTL", 15*time.Minute),
-		RefreshTokenTTL:   getdur("REFRESH_TOKEN_TTL", 720*time.Hour),
-		OTPCodeTTL:        getdur("OTP_CODE_TTL", 5*time.Minute),
-		OTPResendCooldown: getdur("OTP_RESEND_COOLDOWN", 60*time.Second),
-		OTPDailyLimit:     getint("OTP_DAILY_LIMIT", 10),
-		Env:               getenv("APP_ENV", "development"),
-		LogLevel:          getenv("LOG_LEVEL", "info"),
-		AutoMigrate:       getbool("AUTO_MIGRATE", false),
-		DocsEnabled:       getbool("DOCS_ENABLED", true),
+		Port:                getenv("PORT", "8080"),
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		JWTSecret:           os.Getenv("JWT_SECRET"),
+		JWTTTL:              getdur("JWT_TTL", 15*time.Minute),
+		RefreshTokenTTL:     getdur("REFRESH_TOKEN_TTL", 720*time.Hour),
+		OTPCodeTTL:          getdur("OTP_CODE_TTL", 5*time.Minute),
+		OTPResendCooldown:   getdur("OTP_RESEND_COOLDOWN", 60*time.Second),
+		OTPDailyLimit:       getint("OTP_DAILY_LIMIT", 10),
+		AuthRateLimitPerMin: getint("AUTH_RATE_LIMIT_PER_MIN", 30),
+		AuthRateBurst:       getint("AUTH_RATE_BURST", 10),
+		Env:                 getenv("APP_ENV", "development"),
+		LogLevel:            getenv("LOG_LEVEL", "info"),
+		AutoMigrate:         getbool("AUTO_MIGRATE", false),
+		DocsEnabled:         getbool("DOCS_ENABLED", true),
 	}
 
 	if cfg.DatabaseURL == "" {

@@ -57,6 +57,12 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Env != "development" {
 		t.Errorf("Env default = %q, want development", cfg.Env)
 	}
+	if cfg.AuthRateLimitPerMin != 30 {
+		t.Errorf("AuthRateLimitPerMin default = %d, want 30", cfg.AuthRateLimitPerMin)
+	}
+	if cfg.AuthRateBurst != 10 {
+		t.Errorf("AuthRateBurst default = %d, want 10", cfg.AuthRateBurst)
+	}
 }
 
 func TestLoad_InvalidDurationFallsBack(t *testing.T) {

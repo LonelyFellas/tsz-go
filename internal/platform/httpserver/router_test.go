@@ -41,6 +41,30 @@ func TestRouter_UnknownRoute(t *testing.T) {
 	}
 }
 
+// The rate limiter, when supplied, must be mounted on the public /auth/* routes
+// and only there. A burst-0 limiter rejects every request before the handler is
+// reached, so a 429 proves the middleware is wired in; /healthz staying 200
+// proves it's scoped to the auth group and not applied globally.
+func TestRouter_RateLimiterScopedToAuth(t *testing.T) {
+	router := NewRouter(Deps{
+		TokenManager:    auth.NewTokenManager("secret", time.Hour),
+		UserHandler:     user.NewHandler(nil, user.CookieConfig{}, 15*time.Minute, 720*time.Hour),
+		AuthRateLimiter: NewIPRateLimiter(60, 0, time.Minute),
+	})
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil))
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("/auth/login status = %d, want 429 (limiter must be mounted)", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("/healthz status = %d, want 200 (limiter must not be global)", w.Code)
+	}
+}
+
 func TestRouter_ProtectedRouteRequiresAuth(t *testing.T) {
 	// /me is registered behind AuthRequired; with no token the middleware must
 	// reject before the (nil) handler is ever reached.
