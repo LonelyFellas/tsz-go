@@ -264,6 +264,7 @@ Request a one-time login code (sent to the identifier). Code lifetime: **5 minut
 ```json
 { "status": "sent" }
 ```
+**429** `too many code requests, try again later` — per-target rate limit hit: a code was requested again within the resend cooldown (`OTP_RESEND_COOLDOWN`, default 60s) or beyond the daily cap (`OTP_DAILY_LIMIT`, default 10 per 24h). Bounds SMS/email cost; reveals nothing about account existence.
 
 ---
 
