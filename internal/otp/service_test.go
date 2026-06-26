@@ -119,6 +119,39 @@ func TestService_Verify_Expired(t *testing.T) {
 	}
 }
 
+func TestService_SecondCodeInvalidatesFirst(t *testing.T) {
+	store := newFakeStore()
+	sender := NewMockSender()
+	svc := NewService(store, sender, time.Minute)
+	ctx := context.Background()
+
+	// request a first code
+	if err := svc.RequestCode(ctx, "13800138000", "login"); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	firstCode := sender.LastCode("13800138000")
+
+	// request a second code — must supersede the first
+	if err := svc.RequestCode(ctx, "13800138000", "login"); err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	secondCode := sender.LastCode("13800138000")
+
+	if firstCode == secondCode {
+		t.Skip("codes happened to be identical; retry to avoid false-negative")
+	}
+
+	// the first code is now rejected
+	if err := svc.Verify(ctx, "13800138000", "login", firstCode); !errors.Is(err, ErrInvalidCode) {
+		t.Errorf("first code after re-request: err = %v, want ErrInvalidCode", err)
+	}
+
+	// only the second code works
+	if err := svc.Verify(ctx, "13800138000", "login", secondCode); err != nil {
+		t.Errorf("second code verify: %v", err)
+	}
+}
+
 func TestService_RequestCode_SaveError(t *testing.T) {
 	store := newFakeStore()
 	store.saveErr = errors.New("db down")

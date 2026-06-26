@@ -382,3 +382,32 @@ func TestNormalizeIdentifier(t *testing.T) {
 		}
 	}
 }
+
+func TestRole_Valid(t *testing.T) {
+	cases := map[Role]bool{
+		RoleStudent:     true,
+		RoleTeacher:     true,
+		Role("admin"):   false,
+		Role(""):        false,
+		Role("Student"): false, // case-sensitive
+	}
+	for r, want := range cases {
+		if got := r.Valid(); got != want {
+			t.Errorf("Role(%q).Valid() = %v, want %v", string(r), got, want)
+		}
+	}
+}
+
+func TestDefaultRole(t *testing.T) {
+	// empty roles → zero Role (the user holds no identity yet)
+	if got := defaultRole(nil); got != "" {
+		t.Errorf("defaultRole(nil) = %q, want empty", got)
+	}
+	if got := defaultRole([]Role{}); got != "" {
+		t.Errorf("defaultRole([]) = %q, want empty", got)
+	}
+	// first role wins (roles load in a stable order)
+	if got := defaultRole([]Role{RoleTeacher, RoleStudent}); got != RoleTeacher {
+		t.Errorf("defaultRole = %q, want teacher", got)
+	}
+}
