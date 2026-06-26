@@ -12,7 +12,7 @@ func TestTokenRoundTrip(t *testing.T) {
 	tm := NewTokenManager("test-secret", time.Hour)
 	id := uuid.New()
 
-	tok, err := tm.Generate(id)
+	tok, err := tm.Generate(id, "student")
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -21,14 +21,17 @@ func TestTokenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if got != id {
-		t.Fatalf("got %s, want %s", got, id)
+	if got.UserID != id {
+		t.Fatalf("got %s, want %s", got.UserID, id)
+	}
+	if got.Role != "student" {
+		t.Fatalf("role = %q, want student", got.Role)
 	}
 }
 
 func TestParseRejectsExpired(t *testing.T) {
 	tm := NewTokenManager("test-secret", -time.Minute) // already expired
-	tok, err := tm.Generate(uuid.New())
+	tok, err := tm.Generate(uuid.New(), "student")
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -41,7 +44,7 @@ func TestParseRejectsWrongSecret(t *testing.T) {
 	signer := NewTokenManager("secret-a", time.Hour)
 	verifier := NewTokenManager("secret-b", time.Hour)
 
-	tok, _ := signer.Generate(uuid.New())
+	tok, _ := signer.Generate(uuid.New(), "student")
 	if _, err := verifier.Parse(tok); err == nil {
 		t.Fatal("expected token signed with a different secret to be rejected")
 	}

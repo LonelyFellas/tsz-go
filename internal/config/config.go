@@ -14,6 +14,7 @@ type Config struct {
 	DatabaseURL string
 	JWTSecret   string
 	JWTTTL      time.Duration
+	OTPCodeTTL  time.Duration
 	Env         string
 	// AutoMigrate runs migrations on server startup. Off by default so
 	// production migrates as a separate step (see ./cmd/migrate); handy to
@@ -27,6 +28,7 @@ func Load() (Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		JWTSecret:   os.Getenv("JWT_SECRET"),
 		JWTTTL:      getdur("JWT_TTL", 24*time.Hour),
+		OTPCodeTTL:  getdur("OTP_CODE_TTL", 5*time.Minute),
 		Env:         getenv("APP_ENV", "development"),
 		AutoMigrate: getbool("AUTO_MIGRATE", false),
 	}

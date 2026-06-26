@@ -17,13 +17,13 @@ func init() { gin.SetMode(gin.TestMode) }
 func TestAuthRequired(t *testing.T) {
 	tm := auth.NewTokenManager("secret", time.Hour)
 	validUser := uuid.New()
-	validToken, _ := tm.Generate(validUser)
+	validToken, _ := tm.Generate(validUser, "student")
 
 	expired := auth.NewTokenManager("secret", -time.Minute)
-	expiredToken, _ := expired.Generate(uuid.New())
+	expiredToken, _ := expired.Generate(uuid.New(), "student")
 
 	wrongSigner := auth.NewTokenManager("other-secret", time.Hour)
-	wrongToken, _ := wrongSigner.Generate(uuid.New())
+	wrongToken, _ := wrongSigner.Generate(uuid.New(), "student")
 
 	tests := []struct {
 		name       string

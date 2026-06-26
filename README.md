@@ -11,7 +11,7 @@ move fast on business logic, not to prematurely scale.
 | HTTP       | Gin                                     |
 | DB         | PostgreSQL via pgx/v5 (`pgxpool`)       |
 | Migrations | golang-migrate, embedded + auto-run     |
-| Auth       | JWT (HS256) + bcrypt                    |
+| Auth       | JWT (HS256) + bcrypt, role-aware        |
 | Config     | environment variables                   |
 | Logging    | `log/slog` (structured JSON, stdlib)    |
 
@@ -22,6 +22,7 @@ cmd/server/            entry point — wires deps & starts the server
 internal/
   config/              env-based configuration
   auth/                JWT issuing/parsing
+  otp/                 one-time codes: service, repository, pluggable Sender (mock)
   user/                user domain (vertical slice)
     handler.go         HTTP layer
     service.go         business logic
@@ -69,21 +70,68 @@ Integration tests run against a dedicated `tsz_test` database (created automatic
 if missing) so they never pollute the `tsz` development database. Override the target
 DB by exporting `DATABASE_URL` before running `make test-integration`.
 
+## Roles & identity
+
+Auth identity and role are **decoupled**. A single account (`users`) can hold
+more than one role — `student`, `teacher`, or both — tracked in `user_roles`,
+with role-specific data living in `student_profiles` / `teacher_profiles`.
+
+The **active role** travels in the JWT, not on the user record. Switching
+identity therefore means re-issuing a token scoped to a different role; there is
+no server-side session to update. A user picks an initial role at registration,
+can acquire a second one later, and switches between the roles they hold.
+
+## Login methods & verification codes
+
+Phone is the **required** identifier at registration; email is optional. A user
+can log in with **either** identifier (phone or email), via **either** method:
+
+- **password** — `POST /auth/login`
+- **one-time code** — `POST /auth/send-code` then `POST /auth/login/code`
+
+Codes (`verification_codes`) are single-use and time-boxed (`OTP_CODE_TTL`,
+default 5m). Delivery goes through a `Sender` (`internal/otp`); today it's a
+**mock** that just logs the code (`"otp_code_sent" ... code=...`) — swap in a
+real SMS/email provider in `cmd/server/main.go` without touching call sites. The
+channel is inferred from the target: an `@` → email, otherwise SMS.
+
 ## API
 
 ```bash
-# register
+# register — phone + role required; email optional
 curl -X POST localhost:8080/api/v1/auth/register \
   -H 'content-type: application/json' \
-  -d '{"email":"a@b.com","password":"password123","display_name":"Alice"}'
+  -d '{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"Alice","role":"student"}'
+# → 201 {"user":{...,"phone":"13800138000","roles":["student"]},"token":"<jwt>","active_role":"student"}
 
-# login
+# password login — identifier is a phone OR email
 curl -X POST localhost:8080/api/v1/auth/login \
   -H 'content-type: application/json' \
-  -d '{"email":"a@b.com","password":"password123"}'
+  -d '{"identifier":"13800138000","password":"password123"}'
 
-# authenticated
+# code login — step 1: request a code (always 200; mock logs the code)
+curl -X POST localhost:8080/api/v1/auth/send-code \
+  -H 'content-type: application/json' \
+  -d '{"identifier":"13800138000"}'
+# code login — step 2: exchange the code for a token (401 if wrong/expired/used)
+curl -X POST localhost:8080/api/v1/auth/login/code \
+  -H 'content-type: application/json' \
+  -d '{"identifier":"13800138000","code":"123456"}'
+
+# current user — returns all held roles plus the active one
 curl localhost:8080/api/v1/me -H "authorization: Bearer <token>"
+# → 200 {"user":{...,"roles":["student","teacher"]},"active_role":"student"}
+
+# acquire a second identity — returns a token already switched to it (409 if already held)
+curl -X POST localhost:8080/api/v1/auth/roles \
+  -H "authorization: Bearer <token>" -H 'content-type: application/json' \
+  -d '{"role":"teacher"}'
+
+# switch active role — to one the user already holds (403 if not held)
+curl -X POST localhost:8080/api/v1/auth/switch-role \
+  -H "authorization: Bearer <token>" -H 'content-type: application/json' \
+  -d '{"role":"teacher"}'
+# → 200 {"token":"<jwt scoped to teacher>","active_role":"teacher"}
 ```
 
 ## Adding a feature

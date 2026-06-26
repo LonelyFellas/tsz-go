@@ -12,6 +12,7 @@ import (
 
 	"github.com/darwish/tsz-go/internal/auth"
 	"github.com/darwish/tsz-go/internal/config"
+	"github.com/darwish/tsz-go/internal/otp"
 	"github.com/darwish/tsz-go/internal/platform/database"
 	"github.com/darwish/tsz-go/internal/platform/httpserver"
 	"github.com/darwish/tsz-go/internal/user"
@@ -54,8 +55,13 @@ func run() error {
 
 	// Dependency wiring: repository -> service -> handler.
 	tokenManager := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
+
+	// Verification codes (OTP). The mock sender just logs the code; swap in a
+	// real SMS/email provider here when that integration lands.
+	otpService := otp.NewService(otp.NewRepository(pool), otp.NewMockSender(), cfg.OTPCodeTTL)
+
 	userRepo := user.NewRepository(pool)
-	userService := user.NewService(userRepo, tokenManager)
+	userService := user.NewService(userRepo, tokenManager, otpService)
 	userHandler := user.NewHandler(userService)
 
 	router := httpserver.NewRouter(httpserver.Deps{
