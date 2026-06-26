@@ -18,13 +18,14 @@ import (
 
 func init() { gin.SetMode(gin.TestMode) }
 
-// newTestHandler wires a Handler over a fake store and returns both so tests
-// can seed data and drive HTTP requests.
-func newTestHandler() (*Handler, *fakeStore, *fakeCodes, *auth.TokenManager) {
+// newTestHandler wires a Handler over fakes and returns them so tests can seed
+// data and drive HTTP requests.
+func newTestHandler() (*Handler, *fakeStore, *fakeCodes, *fakeSessions, *auth.TokenManager) {
 	store := newFakeStore()
 	codes := newFakeCodes()
+	sessions := newFakeSessions()
 	tm := auth.NewTokenManager("test-secret", time.Hour)
-	return NewHandler(NewService(store, tm, codes)), store, codes, tm
+	return NewHandler(NewService(store, tm, codes, sessions)), store, codes, sessions, tm
 }
 
 func doJSON(t *testing.T, h gin.HandlerFunc, body string) *httptest.ResponseRecorder {
@@ -67,7 +68,7 @@ func TestHandler_Register(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h, _, _, _ := newTestHandler()
+			h, _, _, _, _ := newTestHandler()
 			w := doJSON(t, h.Register, tt.body)
 			if w.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tt.wantStatus, w.Body)
@@ -77,7 +78,7 @@ func TestHandler_Register(t *testing.T) {
 }
 
 func TestHandler_Register_SuccessShape(t *testing.T) {
-	h, _, _, tm := newTestHandler()
+	h, _, _, _, tm := newTestHandler()
 	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"Alice","role":"student"}`)
 
 	if w.Code != http.StatusCreated {
@@ -90,13 +91,17 @@ func TestHandler_Register_SuccessShape(t *testing.T) {
 		t.Errorf("active_role = %v, want student", m["active_role"])
 	}
 
-	// token must be present and valid
-	token, _ := m["token"].(string)
-	if token == "" {
-		t.Fatal("response missing token")
+	// access token must be present and valid
+	access, _ := m["access_token"].(string)
+	if access == "" {
+		t.Fatal("response missing access_token")
 	}
-	if _, err := tm.Parse(token); err != nil {
-		t.Errorf("returned token invalid: %v", err)
+	if _, err := tm.Parse(access); err != nil {
+		t.Errorf("returned access token invalid: %v", err)
+	}
+	// a refresh token must be returned alongside it
+	if refresh, _ := m["refresh_token"].(string); refresh == "" {
+		t.Error("response missing refresh_token")
 	}
 
 	// user object must NOT leak the password hash
@@ -110,7 +115,7 @@ func TestHandler_Register_SuccessShape(t *testing.T) {
 }
 
 func TestHandler_Register_Duplicate409(t *testing.T) {
-	h, _, _, _ := newTestHandler()
+	h, _, _, _, _ := newTestHandler()
 	body := `{"phone":"13800138000","email":"dup@b.com","password":"password123","display_name":"Alice","role":"student"}`
 
 	if w := doJSON(t, h.Register, body); w.Code != http.StatusCreated {
@@ -123,7 +128,7 @@ func TestHandler_Register_Duplicate409(t *testing.T) {
 }
 
 func TestHandler_Login(t *testing.T) {
-	h, _, _, _ := newTestHandler()
+	h, _, _, _, _ := newTestHandler()
 	// seed a user via Register
 	_ = doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
 
@@ -151,7 +156,7 @@ func TestHandler_Login(t *testing.T) {
 }
 
 func TestHandler_SendCodeAndLoginCode(t *testing.T) {
-	h, _, _, _ := newTestHandler()
+	h, _, _, _, _ := newTestHandler()
 	// seed a user via Register
 	_ = doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
 
@@ -180,13 +185,81 @@ func TestHandler_SendCodeAndLoginCode(t *testing.T) {
 	}
 }
 
+// registerAndGetRefresh seeds a user via Register and returns the refresh token
+// from the response.
+func registerAndGetRefresh(t *testing.T, h *Handler) string {
+	t.Helper()
+	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("seed register status = %d", w.Code)
+	}
+	refresh, _ := decode(t, w)["refresh_token"].(string)
+	if refresh == "" {
+		t.Fatal("seed register did not return a refresh token")
+	}
+	return refresh
+}
+
+func TestHandler_Refresh(t *testing.T) {
+	h, _, _, _, _ := newTestHandler()
+	refresh := registerAndGetRefresh(t, h)
+
+	// rotate the refresh token → 200 with a fresh access + rotated refresh
+	w := doJSON(t, h.Refresh, `{"refresh_token":"`+refresh+`"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d, want 200 (body: %s)", w.Code, w.Body)
+	}
+	m := decode(t, w)
+	if m["access_token"] == "" || m["refresh_token"] == "" {
+		t.Errorf("refresh response missing tokens: %v", m)
+	}
+	rotated, _ := m["refresh_token"].(string)
+	if rotated == refresh {
+		t.Error("refresh token was not rotated")
+	}
+
+	// replaying the old refresh token → 401
+	if w := doJSON(t, h.Refresh, `{"refresh_token":"`+refresh+`"}`); w.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed refresh status = %d, want 401", w.Code)
+	}
+	// unknown refresh token → 401
+	if w := doJSON(t, h.Refresh, `{"refresh_token":"nope"}`); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown refresh status = %d, want 401", w.Code)
+	}
+	// missing field → 400
+	if w := doJSON(t, h.Refresh, `{}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing refresh_token status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandler_Logout(t *testing.T) {
+	h, _, _, _, _ := newTestHandler()
+	refresh := registerAndGetRefresh(t, h)
+
+	// logout → 204, and the refresh token is dead afterwards
+	if w := doJSON(t, h.Logout, `{"refresh_token":"`+refresh+`"}`); w.Code != http.StatusNoContent {
+		t.Fatalf("logout status = %d, want 204", w.Code)
+	}
+	if w := doJSON(t, h.Refresh, `{"refresh_token":"`+refresh+`"}`); w.Code != http.StatusUnauthorized {
+		t.Fatalf("post-logout refresh status = %d, want 401", w.Code)
+	}
+	// logout is idempotent: revoking again (or an unknown token) still 204
+	if w := doJSON(t, h.Logout, `{"refresh_token":"`+refresh+`"}`); w.Code != http.StatusNoContent {
+		t.Fatalf("idempotent logout status = %d, want 204", w.Code)
+	}
+	// missing field → 400
+	if w := doJSON(t, h.Logout, `{}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing refresh_token status = %d, want 400", w.Code)
+	}
+}
+
 // The 500 branches: when the store returns an unexpected (non-domain) error,
 // every handler must respond 500 and must not leak the internal error.
 func TestHandler_InternalErrors(t *testing.T) {
 	boom := errors.New("db down")
 
 	t.Run("register 500", func(t *testing.T) {
-		h, store, _, _ := newTestHandler()
+		h, store, _, _, _ := newTestHandler()
 		store.createFn = func(*User, Role) error { return boom }
 		w := doJSON(t, h.Register, `{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"A","role":"student"}`)
 		if w.Code != http.StatusInternalServerError {
@@ -198,7 +271,7 @@ func TestHandler_InternalErrors(t *testing.T) {
 	})
 
 	t.Run("login 500", func(t *testing.T) {
-		h, store, _, _ := newTestHandler()
+		h, store, _, _, _ := newTestHandler()
 		store.getEmail = func(string) (*User, error) { return nil, boom }
 		w := doJSON(t, h.Login, `{"identifier":"a@b.com","password":"password123"}`)
 		if w.Code != http.StatusInternalServerError {
@@ -207,7 +280,7 @@ func TestHandler_InternalErrors(t *testing.T) {
 	})
 
 	t.Run("me 500", func(t *testing.T) {
-		h, store, _, _ := newTestHandler()
+		h, store, _, _, _ := newTestHandler()
 		store.getID = func(uuid.UUID) (*User, error) { return nil, boom }
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
@@ -221,7 +294,7 @@ func TestHandler_InternalErrors(t *testing.T) {
 }
 
 func TestHandler_Me(t *testing.T) {
-	h, store, _, _ := newTestHandler()
+	h, store, _, _, _ := newTestHandler()
 
 	// seed a user directly in the store
 	id := uuid.New()

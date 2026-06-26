@@ -22,6 +22,7 @@ cmd/server/            entry point — wires deps & starts the server
 internal/
   config/              env-based configuration
   auth/                JWT issuing/parsing
+  session/             refresh tokens: service + repository (rotation, single-device)
   otp/                 one-time codes: service, repository, pluggable Sender (mock)
   user/                user domain (vertical slice)
     handler.go         HTTP layer
@@ -95,6 +96,29 @@ default 5m). Delivery goes through a `Sender` (`internal/otp`); today it's a
 real SMS/email provider in `cmd/server/main.go` without touching call sites. The
 channel is inferred from the target: an `@` → email, otherwise SMS.
 
+## Tokens & single-device sessions
+
+Every login (register, password, code) returns **two** tokens:
+
+- **access token** — a short-lived JWT (`JWT_TTL`, default **15m**). It carries
+  the active role and is verified locally by the middleware on every request —
+  **never** checked against the DB, so the auth path stays stateless.
+- **refresh token** — a long-lived (`REFRESH_TOKEN_TTL`, default **30d**) opaque
+  random string. Only its SHA-256 hash is stored (`refresh_tokens`, in
+  `internal/session`). It is used solely against the low-frequency
+  `/auth/refresh` and `/auth/logout` endpoints.
+
+`POST /auth/refresh` rotates the refresh token (the old one is single-use) and
+mints a fresh access token. `POST /auth/logout` revokes a refresh token and is
+idempotent.
+
+Login is **strict single-device**: issuing a refresh token revokes the user's
+other refresh tokens, so a previous device is kicked off as soon as its access
+token expires and its next refresh returns 401 (delay ≤ the access TTL).
+
+`switch-role` / `roles` re-sign only the **access** token; the refresh token is
+untouched, so a role change takes effect within at most one access TTL.
+
 ## API
 
 ```bash
@@ -102,36 +126,49 @@ channel is inferred from the target: an `@` → email, otherwise SMS.
 curl -X POST localhost:8080/api/v1/auth/register \
   -H 'content-type: application/json' \
   -d '{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"Alice","role":"student"}'
-# → 201 {"user":{...,"phone":"13800138000","roles":["student"]},"token":"<jwt>","active_role":"student"}
+# → 201 {"user":{...,"phone":"13800138000","roles":["student"]},
+#        "access_token":"<jwt>","refresh_token":"<opaque>","active_role":"student"}
 
 # password login — identifier is a phone OR email
 curl -X POST localhost:8080/api/v1/auth/login \
   -H 'content-type: application/json' \
   -d '{"identifier":"13800138000","password":"password123"}'
+# → 200 {"user":{...},"access_token":"<jwt>","refresh_token":"<opaque>","active_role":"student"}
 
 # code login — step 1: request a code (always 200; mock logs the code)
 curl -X POST localhost:8080/api/v1/auth/send-code \
   -H 'content-type: application/json' \
   -d '{"identifier":"13800138000"}'
-# code login — step 2: exchange the code for a token (401 if wrong/expired/used)
+# code login — step 2: exchange the code for access+refresh (401 if wrong/expired/used)
 curl -X POST localhost:8080/api/v1/auth/login/code \
   -H 'content-type: application/json' \
   -d '{"identifier":"13800138000","code":"123456"}'
 
+# refresh — rotate the refresh token, get a fresh access token (401 if invalid/revoked/expired)
+curl -X POST localhost:8080/api/v1/auth/refresh \
+  -H 'content-type: application/json' \
+  -d '{"refresh_token":"<opaque>"}'
+# → 200 {"access_token":"<jwt>","refresh_token":"<rotated opaque>"}
+
+# logout — revoke a refresh token (204; idempotent)
+curl -X POST localhost:8080/api/v1/auth/logout \
+  -H 'content-type: application/json' \
+  -d '{"refresh_token":"<opaque>"}'
+
 # current user — returns all held roles plus the active one
-curl localhost:8080/api/v1/me -H "authorization: Bearer <token>"
+curl localhost:8080/api/v1/me -H "authorization: Bearer <access_token>"
 # → 200 {"user":{...,"roles":["student","teacher"]},"active_role":"student"}
 
-# acquire a second identity — returns a token already switched to it (409 if already held)
+# acquire a second identity — returns an access token already switched to it (409 if already held)
 curl -X POST localhost:8080/api/v1/auth/roles \
-  -H "authorization: Bearer <token>" -H 'content-type: application/json' \
+  -H "authorization: Bearer <access_token>" -H 'content-type: application/json' \
   -d '{"role":"teacher"}'
 
 # switch active role — to one the user already holds (403 if not held)
 curl -X POST localhost:8080/api/v1/auth/switch-role \
-  -H "authorization: Bearer <token>" -H 'content-type: application/json' \
+  -H "authorization: Bearer <access_token>" -H 'content-type: application/json' \
   -d '{"role":"teacher"}'
-# → 200 {"token":"<jwt scoped to teacher>","active_role":"teacher"}
+# → 200 {"access_token":"<jwt scoped to teacher>","active_role":"teacher"}
 ```
 
 ## Adding a feature

@@ -15,6 +15,7 @@ import (
 	"github.com/darwish/tsz-go/internal/otp"
 	"github.com/darwish/tsz-go/internal/platform/database"
 	"github.com/darwish/tsz-go/internal/platform/httpserver"
+	"github.com/darwish/tsz-go/internal/session"
 	"github.com/darwish/tsz-go/internal/user"
 )
 
@@ -60,8 +61,11 @@ func run() error {
 	// real SMS/email provider here when that integration lands.
 	otpService := otp.NewService(otp.NewRepository(pool), otp.NewMockSender(), cfg.OTPCodeTTL)
 
+	// Refresh tokens back the access/refresh scheme and strict single-device login.
+	sessionService := session.NewService(session.NewRepository(pool), cfg.RefreshTokenTTL)
+
 	userRepo := user.NewRepository(pool)
-	userService := user.NewService(userRepo, tokenManager, otpService)
+	userService := user.NewService(userRepo, tokenManager, otpService, sessionService)
 	userHandler := user.NewHandler(userService)
 
 	router := httpserver.NewRouter(httpserver.Deps{

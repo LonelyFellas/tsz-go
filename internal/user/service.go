@@ -40,28 +40,40 @@ type Codes interface {
 	Verify(ctx context.Context, target, purpose, code string) error
 }
 
-// Service holds the user business logic.
-type Service struct {
-	repo  Store
-	token *auth.TokenManager
-	codes Codes
+// Sessions is the refresh-token behavior the Service depends on. The
+// session.Service satisfies it; tests use a fake. Issue mints a refresh token
+// for a fresh login (and enforces single-device by revoking the user's others);
+// Rotate exchanges a valid refresh token for a new one and the owning user;
+// Revoke invalidates one (logout).
+type Sessions interface {
+	Issue(ctx context.Context, userID uuid.UUID) (string, error)
+	Rotate(ctx context.Context, rawRefreshToken string) (uuid.UUID, string, error)
+	Revoke(ctx context.Context, rawRefreshToken string) error
 }
 
-func NewService(repo Store, token *auth.TokenManager, codes Codes) *Service {
-	return &Service{repo: repo, token: token, codes: codes}
+// Service holds the user business logic.
+type Service struct {
+	repo     Store
+	token    *auth.TokenManager
+	codes    Codes
+	sessions Sessions
+}
+
+func NewService(repo Store, token *auth.TokenManager, codes Codes, sessions Sessions) *Service {
+	return &Service{repo: repo, token: token, codes: codes, sessions: sessions}
 }
 
 // Register creates an account. Phone is the required identifier; email is
-// optional. The initial identity is role, and the returned token is already
+// optional. The initial identity is role, and the returned tokens are already
 // scoped to that role as the active one.
-func (s *Service) Register(ctx context.Context, phone, email, password, displayName string, role Role) (*User, string, error) {
+func (s *Service) Register(ctx context.Context, phone, email, password, displayName string, role Role) (*User, string, string, error) {
 	if !role.Valid() {
-		return nil, "", ErrInvalidRole
+		return nil, "", "", ErrInvalidRole
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return nil, "", fmt.Errorf("hash password: %w", err)
+		return nil, "", "", fmt.Errorf("hash password: %w", err)
 	}
 
 	u := &User{
@@ -72,33 +84,29 @@ func (s *Service) Register(ctx context.Context, phone, email, password, displayN
 		DisplayName:  strings.TrimSpace(displayName),
 	}
 	if err := s.repo.Create(ctx, u, role); err != nil {
-		return nil, "", err // includes ErrPhoneTaken / ErrEmailTaken
+		return nil, "", "", err // includes ErrPhoneTaken / ErrEmailTaken
 	}
 
-	tok, err := s.token.Generate(u.ID, string(role))
-	if err != nil {
-		return nil, "", fmt.Errorf("generate token: %w", err)
-	}
-	return u, tok, nil
+	return s.issue(ctx, u)
 }
 
 // LoginPassword authenticates with an identifier (phone or email) and a password.
-func (s *Service) LoginPassword(ctx context.Context, identifier, password string) (*User, string, error) {
+func (s *Service) LoginPassword(ctx context.Context, identifier, password string) (*User, string, string, error) {
 	u, err := s.lookupByIdentifier(ctx, identifier)
 	if errors.Is(err, ErrNotFound) {
-		return nil, "", ErrInvalidCredentials
+		return nil, "", "", ErrInvalidCredentials
 	}
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 
 	// Constant-time comparison; same generic error whether the identifier or the
 	// password was wrong, to avoid leaking which accounts exist.
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
-		return nil, "", ErrInvalidCredentials
+		return nil, "", "", ErrInvalidCredentials
 	}
 
-	return s.issue(u)
+	return s.issue(ctx, u)
 }
 
 // RequestLoginCode sends a one-time login code to the identifier (phone → SMS,
@@ -109,20 +117,47 @@ func (s *Service) RequestLoginCode(ctx context.Context, identifier string) error
 
 // LoginCode authenticates with an identifier (phone or email) and a one-time
 // code previously sent via RequestLoginCode.
-func (s *Service) LoginCode(ctx context.Context, identifier, code string) (*User, string, error) {
+func (s *Service) LoginCode(ctx context.Context, identifier, code string) (*User, string, string, error) {
 	u, err := s.lookupByIdentifier(ctx, identifier)
 	if errors.Is(err, ErrNotFound) {
-		return nil, "", ErrInvalidCredentials
+		return nil, "", "", ErrInvalidCredentials
 	}
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 
 	if err := s.codes.Verify(ctx, normalizeIdentifier(identifier), codePurposeLogin, code); err != nil {
-		return nil, "", ErrInvalidCredentials
+		return nil, "", "", ErrInvalidCredentials
 	}
 
-	return s.issue(u)
+	return s.issue(ctx, u)
+}
+
+// Refresh rotates a refresh token and mints a fresh access token for its owner.
+// The new access token's active role defaults to the user's first role (the
+// refresh token itself carries no role). A revoked/expired/unknown refresh token
+// — including one revoked because the user logged in on another device — surfaces
+// as session.ErrInvalidRefreshToken.
+func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (accessToken, refreshToken string, err error) {
+	userID, newRefresh, err := s.sessions.Rotate(ctx, rawRefreshToken)
+	if err != nil {
+		return "", "", err // session.ErrInvalidRefreshToken for any invalid input
+	}
+
+	u, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return "", "", err
+	}
+	access, err := s.token.Generate(userID, string(defaultRole(u.Roles)))
+	if err != nil {
+		return "", "", fmt.Errorf("generate token: %w", err)
+	}
+	return access, newRefresh, nil
+}
+
+// Logout revokes a refresh token. It is idempotent (see session.Service.Revoke).
+func (s *Service) Logout(ctx context.Context, rawRefreshToken string) error {
+	return s.sessions.Revoke(ctx, rawRefreshToken)
 }
 
 // SwitchRole re-issues a token with a different active role. The user must
@@ -167,14 +202,19 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 	return s.repo.GetByID(ctx, id)
 }
 
-// issue returns the user together with a fresh token whose active role defaults
-// to the user's first role.
-func (s *Service) issue(u *User) (*User, string, error) {
-	tok, err := s.token.Generate(u.ID, string(defaultRole(u.Roles)))
+// issue returns the user together with a fresh access + refresh token pair. The
+// access token's active role defaults to the user's first role; minting the
+// refresh token enforces single-device by revoking the user's other sessions.
+func (s *Service) issue(ctx context.Context, u *User) (*User, string, string, error) {
+	access, err := s.token.Generate(u.ID, string(defaultRole(u.Roles)))
 	if err != nil {
-		return nil, "", fmt.Errorf("generate token: %w", err)
+		return nil, "", "", fmt.Errorf("generate token: %w", err)
 	}
-	return u, tok, nil
+	refresh, err := s.sessions.Issue(ctx, u.ID)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("issue refresh token: %w", err)
+	}
+	return u, access, refresh, nil
 }
 
 // lookupByIdentifier resolves a user by email (if the identifier looks like an

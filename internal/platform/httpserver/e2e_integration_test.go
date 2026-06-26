@@ -22,6 +22,7 @@ import (
 	"github.com/darwish/tsz-go/internal/auth"
 	"github.com/darwish/tsz-go/internal/otp"
 	"github.com/darwish/tsz-go/internal/platform/database"
+	"github.com/darwish/tsz-go/internal/session"
 	"github.com/darwish/tsz-go/internal/user"
 )
 
@@ -45,9 +46,104 @@ func buildRealRouter(t *testing.T) (http.Handler, *otp.MockSender) {
 	tm := auth.NewTokenManager("e2e-secret", time.Hour)
 	sender := otp.NewMockSender()
 	otpSvc := otp.NewService(otp.NewRepository(pool), sender, time.Minute)
+	sessionSvc := session.NewService(session.NewRepository(pool), time.Hour)
 	repo := user.NewRepository(pool)
-	svc := user.NewService(repo, tm, otpSvc)
+	svc := user.NewService(repo, tm, otpSvc, sessionSvc)
 	return NewRouter(Deps{TokenManager: tm, UserHandler: user.NewHandler(svc)}), sender
+}
+
+// loginTokens logs in by password and returns the access and refresh tokens.
+func loginTokens(t *testing.T, r http.Handler, identifier, password string) (access, refresh string) {
+	t.Helper()
+	w := req(t, r, http.MethodPost, "/api/v1/auth/login",
+		`{"identifier":"`+identifier+`","password":"`+password+`"}`, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("login status = %d, body=%s", w.Code, w.Body)
+	}
+	var resp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode login: %v", err)
+	}
+	return resp.AccessToken, resp.RefreshToken
+}
+
+func refreshTokens(t *testing.T, r http.Handler, refresh string) *httptest.ResponseRecorder {
+	t.Helper()
+	return req(t, r, http.MethodPost, "/api/v1/auth/refresh", `{"refresh_token":"`+refresh+`"}`, "")
+}
+
+// TestE2E_RefreshAndSingleDevice covers the refresh-token rotation and strict
+// single-device guarantees end-to-end against a live Postgres.
+func TestE2E_RefreshAndSingleDevice(t *testing.T) {
+	r, _ := buildRealRouter(t)
+	email := "e2e-rt-" + uuid.NewString() + "@example.com"
+	phone := fmt.Sprintf("1%010d", time.Now().UnixNano()%1e10)
+	body := `{"phone":"` + phone + `","email":"` + email + `","password":"password123","display_name":"RT","role":"student"}`
+
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/register", body, ""); w.Code != http.StatusCreated {
+		t.Fatalf("register status = %d, body=%s", w.Code, w.Body)
+	}
+
+	// ---- refresh rotation ----
+	// log in on "device 1", then refresh to get a new access + rotated refresh
+	_, refresh1 := loginTokens(t, r, email, "password123")
+
+	w := refreshTokens(t, r, refresh1)
+	if w.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d, body=%s", w.Code, w.Body)
+	}
+	var rotated struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rotated); err != nil {
+		t.Fatalf("decode refresh: %v", err)
+	}
+	if rotated.AccessToken == "" || rotated.RefreshToken == "" {
+		t.Fatal("refresh response missing tokens")
+	}
+	// the new access token works against an authed route
+	if w := req(t, r, http.MethodGet, "/api/v1/me", "", rotated.AccessToken); w.Code != http.StatusOK {
+		t.Fatalf("me with refreshed access status = %d", w.Code)
+	}
+	// replaying the old (now rotated) refresh token → 401
+	if w := refreshTokens(t, r, refresh1); w.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed old refresh status = %d, want 401", w.Code)
+	}
+	// the rotated refresh token is the live one
+	refresh2 := rotated.RefreshToken
+
+	// ---- strict single-device ----
+	// "device 2" logs in; this must revoke device 1's (rotated) refresh token
+	_, deviceB := loginTokens(t, r, email, "password123")
+	if w := refreshTokens(t, r, refresh2); w.Code != http.StatusUnauthorized {
+		t.Fatalf("kicked device-1 refresh status = %d, want 401", w.Code)
+	}
+	// device 2 still refreshes fine
+	w = refreshTokens(t, r, deviceB)
+	if w.Code != http.StatusOK {
+		t.Fatalf("device-2 refresh status = %d, want 200", w.Code)
+	}
+	var deviceBRotated struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &deviceBRotated)
+
+	// ---- logout ----
+	// logout device 2 → 204; afterwards its refresh token is dead
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/logout", `{"refresh_token":"`+deviceBRotated.RefreshToken+`"}`, ""); w.Code != http.StatusNoContent {
+		t.Fatalf("logout status = %d, want 204", w.Code)
+	}
+	if w := refreshTokens(t, r, deviceBRotated.RefreshToken); w.Code != http.StatusUnauthorized {
+		t.Fatalf("post-logout refresh status = %d, want 401", w.Code)
+	}
+	// logout is idempotent
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/logout", `{"refresh_token":"`+deviceBRotated.RefreshToken+`"}`, ""); w.Code != http.StatusNoContent {
+		t.Fatalf("idempotent logout status = %d, want 204", w.Code)
+	}
 }
 
 func req(t *testing.T, r http.Handler, method, path, body, bearer string) *httptest.ResponseRecorder {
@@ -85,16 +181,17 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 		t.Fatalf("register status = %d, body=%s", w.Code, w.Body)
 	}
 	var reg struct {
-		Token string `json:"token"`
-		User  struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		User         struct {
 			ID string `json:"id"`
 		} `json:"user"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &reg); err != nil {
 		t.Fatalf("decode register: %v", err)
 	}
-	if reg.Token == "" || reg.User.ID == "" {
-		t.Fatal("register response missing token or user id")
+	if reg.AccessToken == "" || reg.RefreshToken == "" || reg.User.ID == "" {
+		t.Fatal("register response missing access/refresh token or user id")
 	}
 
 	// duplicate register → 409
@@ -109,7 +206,7 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 		t.Fatalf("login status = %d", w.Code)
 	}
 	var login struct {
-		Token string `json:"token"`
+		AccessToken string `json:"access_token"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &login)
 
@@ -135,7 +232,7 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 	}
 
 	// me with token → 200 and matches the registered user
-	w = req(t, r, http.MethodGet, "/api/v1/me", "", login.Token)
+	w = req(t, r, http.MethodGet, "/api/v1/me", "", login.AccessToken)
 	if w.Code != http.StatusOK {
 		t.Fatalf("me status = %d", w.Code)
 	}
@@ -144,18 +241,18 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 	}
 
 	// switching to a role the user does not yet hold → 403
-	if w := req(t, r, http.MethodPost, "/api/v1/auth/switch-role", `{"role":"teacher"}`, login.Token); w.Code != http.StatusForbidden {
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/switch-role", `{"role":"teacher"}`, login.AccessToken); w.Code != http.StatusForbidden {
 		t.Fatalf("switch-role-unowned status = %d, want 403", w.Code)
 	}
 
 	// acquire the teacher identity → 201 with a token already switched to it
-	w = req(t, r, http.MethodPost, "/api/v1/auth/roles", `{"role":"teacher"}`, login.Token)
+	w = req(t, r, http.MethodPost, "/api/v1/auth/roles", `{"role":"teacher"}`, login.AccessToken)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("add-role status = %d, body=%s", w.Code, w.Body)
 	}
 	var added struct {
-		Token      string `json:"token"`
-		ActiveRole string `json:"active_role"`
+		AccessToken string `json:"access_token"`
+		ActiveRole  string `json:"active_role"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &added)
 	if added.ActiveRole != "teacher" {
@@ -163,7 +260,7 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 	}
 
 	// me now reports both roles
-	w = req(t, r, http.MethodGet, "/api/v1/me", "", added.Token)
+	w = req(t, r, http.MethodGet, "/api/v1/me", "", added.AccessToken)
 	if w.Code != http.StatusOK {
 		t.Fatalf("me status = %d", w.Code)
 	}
@@ -172,7 +269,7 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 	}
 
 	// switching back to student now succeeds → 200
-	if w := req(t, r, http.MethodPost, "/api/v1/auth/switch-role", `{"role":"student"}`, login.Token); w.Code != http.StatusOK {
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/switch-role", `{"role":"student"}`, login.AccessToken); w.Code != http.StatusOK {
 		t.Fatalf("switch-role status = %d, want 200", w.Code)
 	}
 
