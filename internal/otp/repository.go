@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -71,4 +72,18 @@ func (r *Repository) IncrementAttempts(ctx context.Context, id uuid.UUID) error 
 		return fmt.Errorf("increment attempts: %w", err)
 	}
 	return nil
+}
+
+// CountSince counts codes issued to target+purpose at or after `since`. Backed by
+// the (target, purpose, created_at) index that LatestUnconsumed already uses.
+func (r *Repository) CountSince(ctx context.Context, target, purpose string, since time.Time) (int, error) {
+	var n int
+	err := r.db.QueryRow(ctx,
+		`SELECT count(*) FROM verification_codes
+		 WHERE target = $1 AND purpose = $2 AND created_at >= $3`,
+		target, purpose, since).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count codes: %w", err)
+	}
+	return n, nil
 }

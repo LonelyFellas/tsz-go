@@ -18,6 +18,9 @@ var (
 	// expired, already used, or none issued) — deliberately undifferentiated so
 	// callers cannot probe which targets have a pending code.
 	ErrInvalidCode = errors.New("invalid or expired verification code")
+	// ErrRateLimited is returned by RequestCode when a target has asked for codes
+	// too quickly or too often, bounding SMS/email cost and abuse.
+	ErrRateLimited = errors.New("too many code requests, try again later")
 )
 
 // codeDigits is the length of a generated numeric code.
@@ -48,6 +51,9 @@ type Store interface {
 	LatestUnconsumed(ctx context.Context, target, purpose string) (*Code, error)
 	MarkConsumed(ctx context.Context, id uuid.UUID) error
 	IncrementAttempts(ctx context.Context, id uuid.UUID) error
+	// CountSince counts codes issued to target+purpose at or after `since`, for
+	// rate limiting.
+	CountSince(ctx context.Context, target, purpose string, since time.Time) (int, error)
 }
 
 // Service generates, stores, sends and verifies one-time codes.
@@ -55,15 +61,25 @@ type Service struct {
 	store  Store
 	sender Sender
 	ttl    time.Duration
+	// cooldown is the minimum interval between two codes to the same target; 0
+	// disables the cooldown. dailyLimit caps codes per target per rolling 24h; 0
+	// disables the cap. Together they bound SMS/email cost and abuse.
+	cooldown   time.Duration
+	dailyLimit int
 }
 
-func NewService(store Store, sender Sender, ttl time.Duration) *Service {
-	return &Service{store: store, sender: sender, ttl: ttl}
+func NewService(store Store, sender Sender, ttl, cooldown time.Duration, dailyLimit int) *Service {
+	return &Service{store: store, sender: sender, ttl: ttl, cooldown: cooldown, dailyLimit: dailyLimit}
 }
 
 // RequestCode generates a code for target+purpose, stores it, and sends it over
-// the channel implied by the target.
+// the channel implied by the target. It enforces per-target rate limits first,
+// returning ErrRateLimited without sending anything when they are exceeded.
 func (s *Service) RequestCode(ctx context.Context, target, purpose string) error {
+	if err := s.checkRateLimit(ctx, target, purpose); err != nil {
+		return err
+	}
+
 	code, err := generateCode()
 	if err != nil {
 		return fmt.Errorf("generate code: %w", err)
@@ -83,6 +99,31 @@ func (s *Service) RequestCode(ctx context.Context, target, purpose string) error
 	}
 	if err := s.sender.Send(ctx, channel, target, code); err != nil {
 		return fmt.Errorf("send code: %w", err)
+	}
+	return nil
+}
+
+// checkRateLimit enforces the per-target cooldown and daily cap. Each limit is
+// skipped when configured to 0. Returns ErrRateLimited when a limit is hit.
+func (s *Service) checkRateLimit(ctx context.Context, target, purpose string) error {
+	now := time.Now()
+	if s.cooldown > 0 {
+		n, err := s.store.CountSince(ctx, target, purpose, now.Add(-s.cooldown))
+		if err != nil {
+			return fmt.Errorf("cooldown check: %w", err)
+		}
+		if n > 0 {
+			return ErrRateLimited
+		}
+	}
+	if s.dailyLimit > 0 {
+		n, err := s.store.CountSince(ctx, target, purpose, now.Add(-24*time.Hour))
+		if err != nil {
+			return fmt.Errorf("daily-limit check: %w", err)
+		}
+		if n >= s.dailyLimit {
+			return ErrRateLimited
+		}
 	}
 	return nil
 }

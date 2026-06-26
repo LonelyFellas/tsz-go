@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/darwish/tsz-go/internal/auth"
+	"github.com/darwish/tsz-go/internal/otp"
 )
 
 func init() { gin.SetMode(gin.TestMode) }
@@ -182,6 +183,15 @@ func TestHandler_SendCodeAndLoginCode(t *testing.T) {
 	// missing code → 400
 	if w := doJSON(t, h.LoginCode, `{"identifier":"13800138000"}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("login-code missing code status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandler_SendCode_RateLimited(t *testing.T) {
+	h, _, codes, _, _ := newTestHandler()
+	codes.reqFn = func(string, string) error { return otp.ErrRateLimited }
+
+	if w := doJSON(t, h.SendCode, `{"identifier":"13800138000"}`); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("send-code status = %d, want 429 (body: %s)", w.Code, w.Body)
 	}
 }
 
