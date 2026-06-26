@@ -1,0 +1,2 @@
+# Vendored Swagger UI bundle — pinned, minified, not our source.
+internal/platform/httpserver/swaggerui/** linguist-vendored -diff

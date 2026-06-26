@@ -15,6 +15,11 @@ import (
 type Deps struct {
 	TokenManager *auth.TokenManager
 	UserHandler  *user.Handler
+	// OpenAPISpec is the raw OpenAPI document served at /docs/openapi.yaml and
+	// rendered by the Swagger UI at /docs. Docs are mounted only when EnableDocs
+	// is true and the spec is non-empty.
+	OpenAPISpec []byte
+	EnableDocs  bool
 }
 
 func NewRouter(deps Deps) *gin.Engine {
@@ -26,6 +31,10 @@ func NewRouter(deps Deps) *gin.Engine {
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+
+	if deps.EnableDocs {
+		registerDocs(r, deps.OpenAPISpec)
+	}
 
 	v1 := r.Group("/api/v1")
 	{

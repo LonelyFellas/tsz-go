@@ -34,6 +34,10 @@ type Config struct {
 	// production migrates as a separate step (see ./cmd/migrate); handy to
 	// enable locally via AUTO_MIGRATE=true.
 	AutoMigrate bool
+	// DocsEnabled mounts the Swagger UI (/docs) and OpenAPI spec
+	// (/docs/openapi.yaml). On by default; set DOCS_ENABLED=false to hide the API
+	// surface in production.
+	DocsEnabled bool
 }
 
 func Load() (Config, error) {
@@ -49,6 +53,7 @@ func Load() (Config, error) {
 		Env:               getenv("APP_ENV", "development"),
 		LogLevel:          getenv("LOG_LEVEL", "info"),
 		AutoMigrate:       getbool("AUTO_MIGRATE", false),
+		DocsEnabled:       getbool("DOCS_ENABLED", true),
 	}
 
 	if cfg.DatabaseURL == "" {

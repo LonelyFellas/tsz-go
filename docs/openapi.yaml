@@ -1,0 +1,557 @@
+openapi: 3.0.3
+info:
+  title: tsz-go API
+  description: |
+    REST API for the tsz-go backend. All endpoints are JSON over HTTP.
+
+    ## Authentication
+
+    The API uses **JWT access tokens** + **refresh tokens**, stored differently
+    by design:
+
+    - **Access token** — returned in the JSON body (`access_token`). Lifetime 15
+      minutes (default, `JWT_TTL`). Send it on protected endpoints via
+      `Authorization: Bearer <access_token>`. Keep it in memory, not
+      `localStorage`.
+    - **Refresh token** — delivered as an HttpOnly, Secure, SameSite=Strict
+      cookie (`refresh_token`, scoped to `Path=/api/v1/auth`), **not** in the
+      body. Lifetime 30 days (default, `REFRESH_TOKEN_TTL`). The browser sends it
+      automatically to `/auth/refresh` and `/auth/logout`. Make requests with
+      credentials (`withCredentials: true` / `credentials: 'include'`).
+
+    Login is **strict single-device**: each successful login/register revokes the
+    user's previous sessions, and using the refresh cookie rotates it.
+
+    See `docs/api.md` for the full rationale, 401-handling decision tree, and
+    frontend integration guide.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Health
+    description: Liveness and readiness probes.
+  - name: Auth (public)
+    description: Unauthenticated auth flows — register, login, code, refresh, logout.
+  - name: Auth (authenticated)
+    description: Auth operations that require a valid access token (role and session management).
+  - name: User
+    description: The authenticated user's own profile.
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      operationId: healthCheck
+      description: No auth.
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /api/v1/auth/register:
+    post:
+      tags: [Auth (public)]
+      summary: Register a new account (auto-login)
+      operationId: register
+      description: Create an account. Returns tokens, and sets the refresh cookie.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Created
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/RefreshCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                phone:
+                  value: { error: "phone already registered" }
+                email:
+                  value: { error: "email already registered" }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth (public)]
+      summary: Login with identifier + password
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: OK
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/RefreshCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "invalid credentials" }
+
+  /api/v1/auth/send-code:
+    post:
+      tags: [Auth (public)]
+      summary: Request a one-time login code
+      operationId: sendLoginCode
+      description: |
+        Sends a code to the identifier (code lifetime 5 minutes, `OTP_CODE_TTL`).
+        Always returns 200 even for unknown identifiers, so it can't be used to
+        probe which accounts exist.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identifier]
+              properties:
+                identifier:
+                  type: string
+                  description: Phone or email.
+                  example: "13800138000"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: sent
+        "429":
+          description: |
+            Too Many Requests — per-target rate limit hit (resend cooldown
+            `OTP_RESEND_COOLDOWN`, or daily cap `OTP_DAILY_LIMIT`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "too many code requests, try again later" }
+
+  /api/v1/auth/login/code:
+    post:
+      tags: [Auth (public)]
+      summary: Login with identifier + one-time code
+      operationId: loginWithCode
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identifier, code]
+              properties:
+                identifier:
+                  type: string
+                  example: "13800138000"
+                code:
+                  type: string
+                  example: "123456"
+      responses:
+        "200":
+          description: OK
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/RefreshCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: Unauthorized — wrong, expired, or unknown code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "invalid credentials" }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth (public)]
+      summary: Rotate refresh token → new access token
+      operationId: refreshToken
+      description: |
+        Exchanges the `refresh_token` cookie (sent automatically by the browser;
+        requires `withCredentials`) for a new access token and a rotated refresh
+        token (returned via a fresh `Set-Cookie`). No request body.
+      security:
+        - refreshCookie: []
+      responses:
+        "200":
+          description: OK
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/RefreshCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshResponse"
+        "401":
+          description: |
+            Unauthorized. `missing refresh token` (no cookie) or
+            `invalid refresh token` (invalid/revoked/expired; stale cookie is
+            cleared). Either way the session is over — re-login.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                missing:
+                  value: { error: "missing refresh token" }
+                invalid:
+                  value: { error: "invalid refresh token" }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth (public)]
+      summary: Revoke the current refresh token
+      operationId: logout
+      description: |
+        Revokes the refresh token carried by the cookie and clears it.
+        Idempotent — also returns 204 if the cookie was absent or already revoked.
+      security:
+        - refreshCookie: []
+      responses:
+        "204":
+          description: No Content. The refresh cookie is expired via `Set-Cookie`.
+
+  /api/v1/me:
+    get:
+      tags: [User]
+      summary: Current user + active role
+      operationId: getCurrentUser
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "user not found" }
+
+  /api/v1/auth/logout-all:
+    post:
+      tags: [Auth (authenticated)]
+      summary: Revoke every refresh token (logout everywhere)
+      operationId: logoutAll
+      description: |
+        Revokes every refresh token the authenticated user holds, driven by the
+        access token's subject (no refresh cookie needed). Idempotent.
+      responses:
+        "204":
+          description: No Content (also if the user has no active sessions).
+        "401":
+          $ref: "#/components/responses/AuthError"
+
+  /api/v1/auth/switch-role:
+    post:
+      tags: [Auth (authenticated)]
+      summary: Switch active role to one the user already holds
+      operationId: switchRole
+      description: Re-issues an access token scoped to the role. Refresh token unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleTokenResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          description: Forbidden — user does not have this role.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "user does not have this role" }
+
+  /api/v1/auth/roles:
+    post:
+      tags: [Auth (authenticated)]
+      summary: Acquire an additional role, then switch to it
+      operationId: addRole
+      description: |
+        Grants the user a second identity (e.g. a student who also teaches) and
+        returns an access token scoped to the new role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleTokenResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          description: Conflict — user already has this role.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "user already has this role" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "Access token: `Authorization: Bearer <access_token>`."
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: HttpOnly refresh-token cookie, sent automatically by the browser.
+
+  headers:
+    RefreshCookie:
+      description: |
+        Sets (or rotates) the HttpOnly, Secure, SameSite=Strict `refresh_token`
+        cookie, scoped to `Path=/api/v1/auth`.
+      schema:
+        type: string
+      example: refresh_token=...; Path=/api/v1/auth; HttpOnly; Secure; SameSite=Strict
+
+  responses:
+    ValidationError:
+      description: Bad Request — the body failed validation. `error` carries the raw validator message.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    AuthError:
+      description: |
+        Unauthorized. `missing or malformed authorization header` (header absent
+        or not `Bearer <token>`) or `invalid or expired token` (access token
+        expired/tampered — call `/auth/refresh`, then retry).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            missing:
+              value: { error: "missing or malformed authorization header" }
+            expired:
+              value: { error: "invalid or expired token" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable message.
+      required: [error]
+
+    Role:
+      type: string
+      enum: [student, teacher]
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        phone:
+          type: string
+          example: "13800138000"
+        email:
+          type: string
+          format: email
+          description: Omitted if not set.
+        display_name:
+          type: string
+          example: Alice
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+          description: A user may hold both student and teacher.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, phone, display_name, roles, created_at, updated_at]
+
+    RegisterRequest:
+      type: object
+      required: [phone, password, display_name, role]
+      properties:
+        phone:
+          type: string
+          minLength: 5
+          maxLength: 20
+          description: Primary identifier.
+          example: "13800138000"
+        email:
+          type: string
+          format: email
+          description: Optional.
+          example: alice@example.com
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+          example: s3cretpass
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 50
+          example: Alice
+        role:
+          $ref: "#/components/schemas/Role"
+
+    LoginRequest:
+      type: object
+      required: [identifier, password]
+      properties:
+        identifier:
+          type: string
+          description: Phone or email.
+          example: "13800138000"
+        password:
+          type: string
+          example: s3cretpass
+
+    RoleRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          $ref: "#/components/schemas/Role"
+
+    AuthResponse:
+      type: object
+      description: Returned by register / login / login-with-code. The refresh token is NOT here — it is a cookie.
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        access_token:
+          type: string
+          example: "jwt..."
+        active_role:
+          $ref: "#/components/schemas/Role"
+        expires_in:
+          type: integer
+          format: int64
+          description: Access-token lifetime in seconds.
+          example: 900
+        refresh_token_expires_at:
+          type: integer
+          format: int64
+          description: Refresh-token expiry as a Unix timestamp (seconds).
+          example: 1719400000
+      required: [user, access_token, active_role, expires_in, refresh_token_expires_at]
+
+    RefreshResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          example: "jwt..."
+        expires_in:
+          type: integer
+          format: int64
+          example: 900
+        refresh_token_expires_at:
+          type: integer
+          format: int64
+          example: 1719400000
+      required: [access_token, expires_in, refresh_token_expires_at]
+
+    RoleTokenResponse:
+      type: object
+      description: Returned by switch-role / add-role.
+      properties:
+        access_token:
+          type: string
+          example: "jwt..."
+        active_role:
+          $ref: "#/components/schemas/Role"
+      required: [access_token, active_role]
+
+    MeResponse:
+      type: object
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        active_role:
+          $ref: "#/components/schemas/Role"
+      required: [user, active_role]
+
+security:
+  - bearerAuth: []
