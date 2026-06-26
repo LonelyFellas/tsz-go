@@ -1,7 +1,24 @@
 GO ?= go
 MIGRATE_DIR := internal/platform/database/migrations
 
-.PHONY: run build test tidy fmt vet up down logs migrate migrate-create
+# Dev defaults: Postgres runs in Docker, the app runs natively via `go run` so
+# every restart picks up the current source (no image rebuild needed).
+DEV_DATABASE_URL ?= postgres://app:app@localhost:5432/tsz?sslmode=disable
+DEV_JWT_SECRET   ?= change-me-use-a-long-random-string-in-production
+DEV_JWT_TTL      ?= 24h
+
+AIR ?= $(shell go env GOPATH)/bin/air
+
+.PHONY: dev run build test tidy fmt vet up down logs migrate migrate-create
+
+dev: ## Dev loop: Postgres in Docker + air live-reload (rebuilds on save, no Ctrl+C)
+	-docker compose stop app 2>/dev/null
+	docker compose up -d db
+	@echo "waiting for postgres..."
+	@until docker exec tsz-go-db-1 pg_isready -U app -d tsz >/dev/null 2>&1; do sleep 1; done
+	DATABASE_URL="$(DEV_DATABASE_URL)" $(GO) run ./cmd/migrate
+	DATABASE_URL="$(DEV_DATABASE_URL)" JWT_SECRET="$(DEV_JWT_SECRET)" JWT_TTL="$(DEV_JWT_TTL)" \
+		$(AIR)
 
 run: ## Run the server locally (needs DATABASE_URL + JWT_SECRET in env)
 	$(GO) run ./cmd/server
