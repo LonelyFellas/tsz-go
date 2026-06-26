@@ -59,6 +59,18 @@ func (f *fakeStore) MarkConsumed(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (f *fakeStore) CountSince(_ context.Context, target, purpose string, since time.Time) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.byID {
+		if c.Target == target && c.Purpose == purpose && !c.CreatedAt.Before(since) {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func TestChannelFor(t *testing.T) {
 	if ChannelFor("a@b.com") != ChannelEmail {
 		t.Error("email target should map to email channel")
@@ -68,10 +80,46 @@ func TestChannelFor(t *testing.T) {
 	}
 }
 
+func TestService_RequestCode_Cooldown(t *testing.T) {
+	store := newFakeStore()
+	sender := NewMockSender()
+	svc := NewService(store, sender, time.Minute, time.Minute, 0) // 1m cooldown, no daily cap
+	ctx := context.Background()
+
+	if err := svc.RequestCode(ctx, "13800138000", "login"); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	// a second request within the cooldown is rejected and sends nothing new
+	if err := svc.RequestCode(ctx, "13800138000", "login"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("second request err = %v, want ErrRateLimited", err)
+	}
+	// a different target is unaffected
+	if err := svc.RequestCode(ctx, "13900139000", "login"); err != nil {
+		t.Errorf("other target should not be rate limited: %v", err)
+	}
+}
+
+func TestService_RequestCode_DailyLimit(t *testing.T) {
+	store := newFakeStore()
+	sender := NewMockSender()
+	svc := NewService(store, sender, time.Minute, 0, 2) // no cooldown, cap 2/day
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		if err := svc.RequestCode(ctx, "a@b.com", "login"); err != nil {
+			t.Fatalf("request %d: %v", i+1, err)
+		}
+	}
+	// the third request in the window exceeds the daily cap
+	if err := svc.RequestCode(ctx, "a@b.com", "login"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("over-cap request err = %v, want ErrRateLimited", err)
+	}
+}
+
 func TestService_RequestAndVerify(t *testing.T) {
 	store := newFakeStore()
 	sender := NewMockSender()
-	svc := NewService(store, sender, time.Minute)
+	svc := NewService(store, sender, time.Minute, 0, 0)
 	ctx := context.Background()
 
 	if err := svc.RequestCode(ctx, "13800138000", "login"); err != nil {
@@ -98,7 +146,7 @@ func TestService_RequestAndVerify(t *testing.T) {
 }
 
 func TestService_Verify_NoCode(t *testing.T) {
-	svc := NewService(newFakeStore(), NewMockSender(), time.Minute)
+	svc := NewService(newFakeStore(), NewMockSender(), time.Minute, 0, 0)
 	if err := svc.Verify(context.Background(), "13800138000", "login", "123456"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("err = %v, want ErrInvalidCode", err)
 	}
@@ -107,7 +155,7 @@ func TestService_Verify_NoCode(t *testing.T) {
 func TestService_Verify_Expired(t *testing.T) {
 	store := newFakeStore()
 	sender := NewMockSender()
-	svc := NewService(store, sender, -time.Minute) // already expired on issue
+	svc := NewService(store, sender, -time.Minute, 0, 0) // already expired on issue
 	ctx := context.Background()
 
 	if err := svc.RequestCode(ctx, "a@b.com", "login"); err != nil {
@@ -122,7 +170,7 @@ func TestService_Verify_Expired(t *testing.T) {
 func TestService_SecondCodeInvalidatesFirst(t *testing.T) {
 	store := newFakeStore()
 	sender := NewMockSender()
-	svc := NewService(store, sender, time.Minute)
+	svc := NewService(store, sender, time.Minute, 0, 0)
 	ctx := context.Background()
 
 	// request a first code
@@ -155,7 +203,7 @@ func TestService_SecondCodeInvalidatesFirst(t *testing.T) {
 func TestService_RequestCode_SaveError(t *testing.T) {
 	store := newFakeStore()
 	store.saveErr = errors.New("db down")
-	svc := NewService(store, NewMockSender(), time.Minute)
+	svc := NewService(store, NewMockSender(), time.Minute, 0, 0)
 	if err := svc.RequestCode(context.Background(), "13800138000", "login"); err == nil {
 		t.Fatal("expected error when store.Save fails")
 	}

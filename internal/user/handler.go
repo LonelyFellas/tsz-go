@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/darwish/tsz-go/internal/auth"
+	"github.com/darwish/tsz-go/internal/otp"
 	"github.com/darwish/tsz-go/internal/session"
 )
 
@@ -101,6 +102,10 @@ func (h *Handler) SendCode(c *gin.Context) {
 	}
 
 	if err := h.svc.RequestLoginCode(c.Request.Context(), req.Identifier); err != nil {
+		if errors.Is(err, otp.ErrRateLimited) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many code requests, try again later"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}

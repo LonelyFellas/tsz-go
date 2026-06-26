@@ -59,7 +59,7 @@ func run() error {
 
 	// Verification codes (OTP). The mock sender just logs the code; swap in a
 	// real SMS/email provider here when that integration lands.
-	otpService := otp.NewService(otp.NewRepository(pool), otp.NewMockSender(), cfg.OTPCodeTTL)
+	otpService := otp.NewService(otp.NewRepository(pool), otp.NewMockSender(), cfg.OTPCodeTTL, cfg.OTPResendCooldown, cfg.OTPDailyLimit)
 
 	// Refresh tokens back the access/refresh scheme and strict single-device login.
 	sessionService := session.NewService(session.NewRepository(pool), cfg.RefreshTokenTTL)
