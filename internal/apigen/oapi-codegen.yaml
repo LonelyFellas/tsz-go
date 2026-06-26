@@ -1,0 +1,13 @@
+# Sample oapi-codegen config (design-first). Generates Go types + a gin server
+# interface straight from docs/openapi.yaml — the spec is the source of truth.
+#
+# Scoped to a single operation (getCurrentUser) so this stays a focused demo of
+# the shape. Drop `include-operation-ids` to generate the whole API.
+package: apigen
+output: apigen.gen.go
+generate:
+  models: true
+  gin-server: true
+output-options:
+  include-operation-ids:
+    - getCurrentUser
