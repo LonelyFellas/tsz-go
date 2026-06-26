@@ -31,6 +31,7 @@ type Store interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*User, error)
 	HasRole(ctx context.Context, userID uuid.UUID, role Role) (bool, error)
 	AddRole(ctx context.Context, userID uuid.UUID, role Role) error
+	SetActiveRole(ctx context.Context, userID uuid.UUID, role Role) error
 }
 
 // Codes is the verification-code behavior the Service depends on for code-based
@@ -44,11 +45,13 @@ type Codes interface {
 // session.Service satisfies it; tests use a fake. Issue mints a refresh token
 // for a fresh login (and enforces single-device by revoking the user's others);
 // Rotate exchanges a valid refresh token for a new one and the owning user;
-// Revoke invalidates one (logout).
+// Revoke invalidates one (logout); RevokeAll invalidates every token a user
+// holds (logout everywhere).
 type Sessions interface {
 	Issue(ctx context.Context, userID uuid.UUID) (string, error)
 	Rotate(ctx context.Context, rawRefreshToken string) (uuid.UUID, string, error)
 	Revoke(ctx context.Context, rawRefreshToken string) error
+	RevokeAll(ctx context.Context, userID uuid.UUID) error
 }
 
 // Service holds the user business logic.
@@ -134,8 +137,9 @@ func (s *Service) LoginCode(ctx context.Context, identifier, code string) (*User
 }
 
 // Refresh rotates a refresh token and mints a fresh access token for its owner.
-// The new access token's active role defaults to the user's first role (the
-// refresh token itself carries no role). A revoked/expired/unknown refresh token
+// The new access token resumes the user's last active role (the refresh token
+// itself carries no role), so a prior switch-role survives token expiry. A
+// revoked/expired/unknown refresh token
 // — including one revoked because the user logged in on another device — surfaces
 // as session.ErrInvalidRefreshToken.
 func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (accessToken, refreshToken string, err error) {
@@ -148,7 +152,7 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (accessTo
 	if err != nil {
 		return "", "", err
 	}
-	access, err := s.token.Generate(userID, string(defaultRole(u.Roles)))
+	access, err := s.token.Generate(userID, string(activeRole(u)))
 	if err != nil {
 		return "", "", fmt.Errorf("generate token: %w", err)
 	}
@@ -158,6 +162,14 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (accessTo
 // Logout revokes a refresh token. It is idempotent (see session.Service.Revoke).
 func (s *Service) Logout(ctx context.Context, rawRefreshToken string) error {
 	return s.sessions.Revoke(ctx, rawRefreshToken)
+}
+
+// LogoutAll revokes every refresh token the user holds (logout everywhere).
+// Driven by the authenticated user's ID rather than a presented refresh token,
+// so a user can sign out other devices using only their access token. Idempotent
+// (see session.Service.RevokeAll).
+func (s *Service) LogoutAll(ctx context.Context, userID uuid.UUID) error {
+	return s.sessions.RevokeAll(ctx, userID)
 }
 
 // SwitchRole re-issues a token with a different active role. The user must
@@ -172,6 +184,12 @@ func (s *Service) SwitchRole(ctx context.Context, userID uuid.UUID, role Role) (
 	}
 	if !has {
 		return "", ErrRoleNotOwned
+	}
+
+	// Persist the new active role so it survives a token refresh, not just the
+	// lifetime of this access token.
+	if err := s.repo.SetActiveRole(ctx, userID, role); err != nil {
+		return "", err
 	}
 
 	tok, err := s.token.Generate(userID, string(role))
@@ -191,6 +209,11 @@ func (s *Service) AddRole(ctx context.Context, userID uuid.UUID, role Role) (str
 		return "", err // includes ErrRoleTaken
 	}
 
+	// The new role becomes the active one; persist it so a refresh keeps it.
+	if err := s.repo.SetActiveRole(ctx, userID, role); err != nil {
+		return "", err
+	}
+
 	tok, err := s.token.Generate(userID, string(role))
 	if err != nil {
 		return "", fmt.Errorf("generate token: %w", err)
@@ -203,10 +226,11 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 }
 
 // issue returns the user together with a fresh access + refresh token pair. The
-// access token's active role defaults to the user's first role; minting the
-// refresh token enforces single-device by revoking the user's other sessions.
+// access token resumes the user's last active role (falling back to their first
+// role); minting the refresh token enforces single-device by revoking the user's
+// other sessions.
 func (s *Service) issue(ctx context.Context, u *User) (*User, string, string, error) {
-	access, err := s.token.Generate(u.ID, string(defaultRole(u.Roles)))
+	access, err := s.token.Generate(u.ID, string(activeRole(u)))
 	if err != nil {
 		return nil, "", "", fmt.Errorf("generate token: %w", err)
 	}
@@ -226,8 +250,20 @@ func (s *Service) lookupByIdentifier(ctx context.Context, identifier string) (*U
 	return s.repo.GetByPhone(ctx, normalizePhone(identifier))
 }
 
-// defaultRole picks the active role for a freshly logged-in user. Roles are
-// loaded in a stable order, so this is deterministic.
+// activeRole is the role a freshly issued token should act as: the user's last
+// active role if it's still one they hold, otherwise their default role. This is
+// what lets a switch-role survive a token refresh.
+func activeRole(u *User) Role {
+	for _, r := range u.Roles {
+		if r == u.LastActiveRole {
+			return u.LastActiveRole
+		}
+	}
+	return defaultRole(u.Roles)
+}
+
+// defaultRole picks the fallback active role for a user with no recorded active
+// role. Roles are loaded in a stable order, so this is deterministic.
 func defaultRole(roles []Role) Role {
 	if len(roles) == 0 {
 		return ""

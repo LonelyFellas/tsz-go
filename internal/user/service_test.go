@@ -297,6 +297,35 @@ func TestService_Refresh_RotatesAndReSignsAccess(t *testing.T) {
 	}
 }
 
+// Regression: a switch-role must survive a token refresh. Previously Refresh
+// always re-issued the default (first) role, silently undoing a prior switch.
+func TestService_Refresh_PreservesActiveRole(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	ctx := context.Background()
+	reg, _, refresh, _ := svc.Register(ctx, "13800138000", "pa@example.com", "password123", "PA", RoleStudent)
+
+	// become a teacher and switch to that role
+	if _, err := svc.AddRole(ctx, reg.ID, RoleTeacher); err != nil {
+		t.Fatalf("add role: %v", err)
+	}
+	if _, err := svc.SwitchRole(ctx, reg.ID, RoleTeacher); err != nil {
+		t.Fatalf("switch role: %v", err)
+	}
+
+	// refreshing the access token must keep the teacher role, not reset to student
+	access, _, err := svc.Refresh(ctx, refresh)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	claims, err := svc.token.Parse(access)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if claims.Role != string(RoleTeacher) {
+		t.Errorf("refreshed active role = %q, want teacher (switch-role lost on refresh)", claims.Role)
+	}
+}
+
 func TestService_Logout_RevokesRefresh(t *testing.T) {
 	svc, _, _, _ := newTestService()
 	ctx := context.Background()

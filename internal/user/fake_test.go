@@ -46,10 +46,20 @@ func (f *fakeStore) Create(_ context.Context, u *User, role Role) error {
 		}
 	}
 	u.Roles = []Role{role}
+	u.LastActiveRole = role
 	// copy to avoid callers mutating stored state
 	cp := *u
 	f.byID[u.ID] = &cp
 	f.roles[u.ID] = map[Role]bool{role: true}
+	return nil
+}
+
+func (f *fakeStore) SetActiveRole(_ context.Context, userID uuid.UUID, role Role) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if u := f.byID[userID]; u != nil {
+		u.LastActiveRole = role
+	}
 	return nil
 }
 
@@ -203,5 +213,16 @@ func (f *fakeSessions) Revoke(_ context.Context, raw string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.active, raw)
+	return nil
+}
+
+func (f *fakeSessions) RevokeAll(_ context.Context, userID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for raw, uid := range f.active {
+		if uid == userID {
+			delete(f.active, raw)
+		}
+	}
 	return nil
 }

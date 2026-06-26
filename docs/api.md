@@ -300,6 +300,8 @@ Exchange a refresh token for a new access token + **rotated** refresh token.
 ```
 > Save the returned `refresh_token`; the one you sent is now invalid.
 
+The new access token keeps the user's **last active role** — a prior `switch-role` survives the refresh rather than reverting to the default role.
+
 **400** validation error
 **401** `invalid refresh token` (invalid / revoked / expired) → session is over, re-login.
 
@@ -335,6 +337,15 @@ Current user + the role the token is acting as.
 }
 ```
 **404** `user not found`
+
+---
+
+#### `POST /api/v1/auth/logout-all`
+Revoke **every** refresh token the authenticated user holds (logout on all devices). Driven by the access token's subject, so no refresh token is needed in the body — handy for signing out other devices from the current one. Idempotent.
+
+**Body** — none.
+
+**204** No Content (also returned if the user has no active sessions).
 
 ---
 

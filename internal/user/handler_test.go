@@ -253,6 +253,36 @@ func TestHandler_Logout(t *testing.T) {
 	}
 }
 
+func TestHandler_LogoutAll(t *testing.T) {
+	h, _, _, _, _ := newTestHandler()
+
+	// Register seeds a user + refresh token; grab the user ID too so we can drive
+	// LogoutAll the way AuthRequired would (from the access token's subject).
+	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("seed register status = %d", w.Code)
+	}
+	body := decode(t, w)
+	refresh, _ := body["refresh_token"].(string)
+	user, _ := body["user"].(map[string]any)
+	userID, err := uuid.Parse(user["id"].(string))
+	if err != nil {
+		t.Fatalf("parse user id: %v", err)
+	}
+
+	// logout-all → 204, and the user's refresh token is dead afterwards
+	if w := doJSONAuthed(t, h.LogoutAll, `{}`, userID); w.Code != http.StatusNoContent {
+		t.Fatalf("logout-all status = %d, want 204", w.Code)
+	}
+	if w := doJSON(t, h.Refresh, `{"refresh_token":"`+refresh+`"}`); w.Code != http.StatusUnauthorized {
+		t.Fatalf("post-logout-all refresh status = %d, want 401", w.Code)
+	}
+	// idempotent: a user with no active sessions still returns 204
+	if w := doJSONAuthed(t, h.LogoutAll, `{}`, userID); w.Code != http.StatusNoContent {
+		t.Fatalf("idempotent logout-all status = %d, want 204", w.Code)
+	}
+}
+
 // The 500 branches: when the store returns an unexpected (non-domain) error,
 // every handler must respond 500 and must not leak the internal error.
 func TestHandler_InternalErrors(t *testing.T) {
