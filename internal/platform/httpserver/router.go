@@ -20,6 +20,9 @@ type Deps struct {
 	// is true and the spec is non-empty.
 	OpenAPISpec []byte
 	EnableDocs  bool
+	// AuthRateLimiter throttles the public auth endpoints per client IP. Nil
+	// disables the throttle (e.g. in tests, or when configured off).
+	AuthRateLimiter *IPRateLimiter
 }
 
 func NewRouter(deps Deps) *gin.Engine {
@@ -38,13 +41,19 @@ func NewRouter(deps Deps) *gin.Engine {
 
 	v1 := r.Group("/api/v1")
 	{
-		// Public routes.
-		v1.POST("/auth/register", deps.UserHandler.Register)
-		v1.POST("/auth/login", deps.UserHandler.Login)          // identifier + password
-		v1.POST("/auth/send-code", deps.UserHandler.SendCode)   // request a login code
-		v1.POST("/auth/login/code", deps.UserHandler.LoginCode) // identifier + code
-		v1.POST("/auth/refresh", deps.UserHandler.Refresh)      // rotate refresh → new access
-		v1.POST("/auth/logout", deps.UserHandler.Logout)        // revoke a refresh token
+		// Public auth routes. Throttled per client IP to blunt credential
+		// stuffing and SMS/email abuse from a single host; the per-target OTP
+		// limits in internal/otp are the complementary second layer.
+		public := v1.Group("/auth")
+		if deps.AuthRateLimiter != nil {
+			public.Use(deps.AuthRateLimiter.Middleware())
+		}
+		public.POST("/register", deps.UserHandler.Register)
+		public.POST("/login", deps.UserHandler.Login)          // identifier + password
+		public.POST("/send-code", deps.UserHandler.SendCode)   // request a login code
+		public.POST("/login/code", deps.UserHandler.LoginCode) // identifier + code
+		public.POST("/refresh", deps.UserHandler.Refresh)      // rotate refresh → new access
+		public.POST("/logout", deps.UserHandler.Logout)        // revoke a refresh token
 
 		// Authenticated routes.
 		authed := v1.Group("")

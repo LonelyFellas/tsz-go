@@ -78,11 +78,19 @@ func run() error {
 		MaxAge: cfg.RefreshTokenTTL,
 	}, cfg.JWTTTL, cfg.RefreshTokenTTL)
 
+	// Per-IP throttle on the public auth endpoints; disabled when configured
+	// to 0. Idle buckets are evicted after a fixed window so memory is bounded.
+	var authRateLimiter *httpserver.IPRateLimiter
+	if cfg.AuthRateLimitPerMin > 0 {
+		authRateLimiter = httpserver.NewIPRateLimiter(cfg.AuthRateLimitPerMin, cfg.AuthRateBurst, 10*time.Minute)
+	}
+
 	router := httpserver.NewRouter(httpserver.Deps{
-		TokenManager: tokenManager,
-		UserHandler:  userHandler,
-		OpenAPISpec:  docs.OpenAPISpec,
-		EnableDocs:   cfg.DocsEnabled,
+		TokenManager:    tokenManager,
+		UserHandler:     userHandler,
+		OpenAPISpec:     docs.OpenAPISpec,
+		EnableDocs:      cfg.DocsEnabled,
+		AuthRateLimiter: authRateLimiter,
 	})
 
 	srv := &http.Server{

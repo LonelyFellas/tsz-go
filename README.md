@@ -96,6 +96,20 @@ default 5m). Delivery goes through a `Sender` (`internal/otp`); today it's a
 real SMS/email provider in `cmd/server/main.go` without touching call sites. The
 channel is inferred from the target: an `@` → email, otherwise SMS.
 
+## Rate limiting
+
+Two complementary layers guard the auth surface:
+
+- **Per-target** (`internal/otp`) — code requests to a single phone/email are
+  bounded by a cooldown (`OTP_RESEND_COOLDOWN`, default 60s) and a daily cap
+  (`OTP_DAILY_LIMIT`, default 10), capping SMS/email cost and per-account abuse.
+- **Per-IP** (`internal/platform/httpserver`) — a token-bucket middleware throttles
+  every public `/auth/*` endpoint by client IP (`AUTH_RATE_LIMIT_PER_MIN`, default
+  30, with an `AUTH_RATE_BURST` of 10), blunting credential stuffing and a single
+  host cycling through identifiers. Over-budget requests get a `429` with
+  `Retry-After`. Set the rate to `0` to disable. Behind a proxy/LB, configure the
+  engine's trusted proxies so `X-Forwarded-For` can't be spoofed to dodge the limit.
+
 ## Tokens & single-device sessions
 
 Every login (register, password, code) returns **two** tokens:
