@@ -26,7 +26,7 @@ func newTestHandler() (*Handler, *fakeStore, *fakeCodes, *fakeSessions, *auth.To
 	codes := newFakeCodes()
 	sessions := newFakeSessions()
 	tm := auth.NewTokenManager("test-secret", time.Hour)
-	return NewHandler(NewService(store, tm, codes, sessions), CookieConfig{MaxAge: time.Hour}), store, codes, sessions, tm
+	return NewHandler(NewService(store, tm, codes, sessions), CookieConfig{MaxAge: time.Hour}, 15*time.Minute, time.Hour), store, codes, sessions, tm
 }
 
 func doJSON(t *testing.T, h gin.HandlerFunc, body string) *httptest.ResponseRecorder {
@@ -149,7 +149,7 @@ func TestHandler_Register_SuccessShape(t *testing.T) {
 func TestHandler_RefreshCookieAttributes(t *testing.T) {
 	store := newFakeStore()
 	tm := auth.NewTokenManager("test-secret", time.Hour)
-	h := NewHandler(NewService(store, tm, newFakeCodes(), newFakeSessions()), CookieConfig{Secure: true, MaxAge: time.Hour})
+	h := NewHandler(NewService(store, tm, newFakeCodes(), newFakeSessions()), CookieConfig{Secure: true, MaxAge: time.Hour}, 15*time.Minute, time.Hour)
 
 	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"A","role":"student"}`)
 	if w.Code != http.StatusCreated {
@@ -511,6 +511,77 @@ func TestHandler_AddRole(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", w.Code)
 		}
+	})
+}
+
+// TestHandler_TokenExpiryFields verifies that every endpoint that issues tokens
+// returns expires_in (access TTL in seconds) and refresh_token_expires_at (Unix
+// timestamp) and that both values are consistent with the configured TTLs.
+func TestHandler_TokenExpiryFields(t *testing.T) {
+	const accessTTL = 15 * time.Minute
+	const refreshTTL = time.Hour
+
+	// assertExpiry checks expires_in and refresh_token_expires_at in a decoded body.
+	assertExpiry := func(t *testing.T, m map[string]any, label string) {
+		t.Helper()
+
+		expiresIn, ok := m["expires_in"].(float64)
+		if !ok {
+			t.Errorf("%s: expires_in missing or wrong type (%T)", label, m["expires_in"])
+		} else if int64(expiresIn) != int64(accessTTL.Seconds()) {
+			t.Errorf("%s: expires_in = %v, want %v", label, int64(expiresIn), int64(accessTTL.Seconds()))
+		}
+
+		expiresAt, ok := m["refresh_token_expires_at"].(float64)
+		if !ok {
+			t.Errorf("%s: refresh_token_expires_at missing or wrong type (%T)", label, m["refresh_token_expires_at"])
+		} else {
+			// Allow ±5 s for test execution time.
+			want := time.Now().Add(refreshTTL).Unix()
+			if diff := int64(expiresAt) - want; diff < -5 || diff > 5 {
+				t.Errorf("%s: refresh_token_expires_at = %v, want ~%v (diff %d s)", label, int64(expiresAt), want, diff)
+			}
+		}
+	}
+
+	t.Run("register", func(t *testing.T) {
+		h, _, _, _, _ := newTestHandler()
+		w := doJSON(t, h.Register, `{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"A","role":"student"}`)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("status = %d", w.Code)
+		}
+		assertExpiry(t, decode(t, w), "register")
+	})
+
+	t.Run("login", func(t *testing.T) {
+		h, _, _, _, _ := newTestHandler()
+		_ = doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
+		w := doJSON(t, h.Login, `{"identifier":"u@b.com","password":"password123"}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d", w.Code)
+		}
+		assertExpiry(t, decode(t, w), "login")
+	})
+
+	t.Run("login_code", func(t *testing.T) {
+		h, _, _, _, _ := newTestHandler()
+		_ = doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
+		_ = doJSON(t, h.SendCode, `{"identifier":"13800138000"}`)
+		w := doJSON(t, h.LoginCode, `{"identifier":"13800138000","code":"123456"}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d", w.Code)
+		}
+		assertExpiry(t, decode(t, w), "login_code")
+	})
+
+	t.Run("refresh", func(t *testing.T) {
+		h, _, _, _, _ := newTestHandler()
+		refresh := registerAndGetRefresh(t, h)
+		w := doCookie(t, h.Refresh, refresh)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d", w.Code)
+		}
+		assertExpiry(t, decode(t, w), "refresh")
 	})
 }
 
