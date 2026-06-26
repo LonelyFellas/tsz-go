@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel an in-progress run when new commits are pushed to the same ref, so a
+# rapid series of pushes doesn't pile up redundant CI runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -39,13 +45,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Format check
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
       - name: Vet
         run: go vet -tags=integration ./...
 
       # -tags=integration runs the unit tests *and* the integration/e2e tests
       # (the latter no longer skip because DATABASE_URL is set above).
+      # -race catches data races in the mutex-guarded in-memory fakes and the
+      # session/OTP code paths.
       - name: Test (unit + integration)
-        run: go test -tags=integration -cover ./...
+        run: go test -race -tags=integration -cover ./...
 
   # Build the image and push it to GHCR once tests pass. Runs only on pushes to
   # main (not on PRs), so every merged commit gets a published image tagged with
