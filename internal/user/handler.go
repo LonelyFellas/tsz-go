@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/darwish/tsz-go/internal/auth"
+	"github.com/darwish/tsz-go/internal/session"
 )
 
 // Handler adapts HTTP requests to the Service. It owns request/response shapes
@@ -28,10 +29,13 @@ type registerRequest struct {
 	Role        string `json:"role" binding:"required,oneof=student teacher"`
 }
 
+// authResponse is the unified login/register payload: the user plus a short-lived
+// access token and a long-lived refresh token (used against /auth/refresh).
 type authResponse struct {
-	User       *User  `json:"user"`
-	Token      string `json:"token"`
-	ActiveRole string `json:"active_role"`
+	User         *User  `json:"user"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ActiveRole   string `json:"active_role"`
 }
 
 func (h *Handler) Register(c *gin.Context) {
@@ -41,7 +45,7 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	u, token, err := h.svc.Register(c.Request.Context(), req.Phone, req.Email, req.Password, req.DisplayName, Role(req.Role))
+	u, access, refresh, err := h.svc.Register(c.Request.Context(), req.Phone, req.Email, req.Password, req.DisplayName, Role(req.Role))
 	switch {
 	case errors.Is(err, ErrPhoneTaken):
 		c.JSON(http.StatusConflict, gin.H{"error": "phone already registered"})
@@ -54,7 +58,7 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, authResponse{User: u, Token: token, ActiveRole: req.Role})
+	c.JSON(http.StatusCreated, authResponse{User: u, AccessToken: access, RefreshToken: refresh, ActiveRole: req.Role})
 }
 
 type loginRequest struct {
@@ -70,7 +74,7 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	u, token, err := h.svc.LoginPassword(c.Request.Context(), req.Identifier, req.Password)
+	u, access, refresh, err := h.svc.LoginPassword(c.Request.Context(), req.Identifier, req.Password)
 	switch {
 	case errors.Is(err, ErrInvalidCredentials):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
@@ -80,7 +84,7 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, authResponse{User: u, Token: token, ActiveRole: string(defaultRole(u.Roles))})
+	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, RefreshToken: refresh, ActiveRole: string(defaultRole(u.Roles))})
 }
 
 type sendCodeRequest struct {
@@ -117,7 +121,7 @@ func (h *Handler) LoginCode(c *gin.Context) {
 		return
 	}
 
-	u, token, err := h.svc.LoginCode(c.Request.Context(), req.Identifier, req.Code)
+	u, access, refresh, err := h.svc.LoginCode(c.Request.Context(), req.Identifier, req.Code)
 	switch {
 	case errors.Is(err, ErrInvalidCredentials):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
@@ -127,7 +131,52 @@ func (h *Handler) LoginCode(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, authResponse{User: u, Token: token, ActiveRole: string(defaultRole(u.Roles))})
+	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, RefreshToken: refresh, ActiveRole: string(defaultRole(u.Roles))})
+}
+
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token" binding:"required"`
+}
+
+// Refresh exchanges a valid refresh token for a new access token and a rotated
+// refresh token. An invalid/revoked/expired refresh token → 401.
+func (h *Handler) Refresh(c *gin.Context) {
+	var req refreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	access, refresh, err := h.svc.Refresh(c.Request.Context(), req.RefreshToken)
+	switch {
+	case errors.Is(err, session.ErrInvalidRefreshToken):
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid refresh token"})
+		return
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"access_token": access, "refresh_token": refresh})
+}
+
+// Logout revokes a refresh token. Idempotent: a missing/already-revoked token
+// still returns 204.
+func (h *Handler) Logout(c *gin.Context) {
+	var req refreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.svc.Logout(c.Request.Context(), req.RefreshToken); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	// 204 has no body; flush the status now so it's emitted even with no write.
+	c.Status(http.StatusNoContent)
+	c.Writer.WriteHeaderNow()
 }
 
 type roleRequest struct {
@@ -154,7 +203,7 @@ func (h *Handler) SwitchRole(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"token": token, "active_role": req.Role})
+	c.JSON(http.StatusOK, gin.H{"access_token": token, "active_role": req.Role})
 }
 
 // AddRole grants the user a second identity and returns a token switched to it.
@@ -177,7 +226,7 @@ func (h *Handler) AddRole(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"token": token, "active_role": req.Role})
+	c.JSON(http.StatusCreated, gin.H{"access_token": token, "active_role": req.Role})
 }
 
 func (h *Handler) Me(c *gin.Context) {

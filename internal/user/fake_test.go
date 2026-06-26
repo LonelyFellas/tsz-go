@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
+	"github.com/darwish/tsz-go/internal/session"
 )
 
 // fakeStore is an in-memory Store used to unit-test the Service and Handler
@@ -150,5 +152,56 @@ func (f *fakeCodes) Verify(_ context.Context, target, purpose, code string) erro
 		return ErrInvalidCredentials
 	}
 	delete(f.codes, target)
+	return nil
+}
+
+// fakeSessions is an in-memory Sessions used to unit-test the Service and
+// Handler. It mirrors the real session.Service contract: Issue enforces strict
+// single-device (revokes the user's other tokens), Rotate is single-use, and
+// Revoke is idempotent. Invalid tokens map to session.ErrInvalidRefreshToken.
+type fakeSessions struct {
+	mu       sync.Mutex
+	active   map[string]uuid.UUID // raw token -> owning user
+	issueErr error                // optional override to force Issue to fail
+}
+
+func newFakeSessions() *fakeSessions {
+	return &fakeSessions{active: make(map[string]uuid.UUID)}
+}
+
+func (f *fakeSessions) Issue(_ context.Context, userID uuid.UUID) (string, error) {
+	if f.issueErr != nil {
+		return "", f.issueErr
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// strict single-device: revoke the user's other tokens
+	for raw, uid := range f.active {
+		if uid == userID {
+			delete(f.active, raw)
+		}
+	}
+	raw := uuid.NewString()
+	f.active[raw] = userID
+	return raw, nil
+}
+
+func (f *fakeSessions) Rotate(_ context.Context, raw string) (uuid.UUID, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	uid, ok := f.active[raw]
+	if !ok {
+		return uuid.Nil, "", session.ErrInvalidRefreshToken
+	}
+	delete(f.active, raw)
+	newRaw := uuid.NewString()
+	f.active[newRaw] = uid
+	return uid, newRaw, nil
+}
+
+func (f *fakeSessions) Revoke(_ context.Context, raw string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.active, raw)
 	return nil
 }

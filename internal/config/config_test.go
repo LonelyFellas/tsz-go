@@ -48,8 +48,11 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Port != "8080" {
 		t.Errorf("Port default = %q, want 8080", cfg.Port)
 	}
-	if cfg.JWTTTL != 24*time.Hour {
-		t.Errorf("JWTTTL default = %v, want 24h", cfg.JWTTTL)
+	if cfg.JWTTTL != 15*time.Minute {
+		t.Errorf("JWTTTL default = %v, want 15m", cfg.JWTTTL)
+	}
+	if cfg.RefreshTokenTTL != 720*time.Hour {
+		t.Errorf("RefreshTokenTTL default = %v, want 720h", cfg.RefreshTokenTTL)
 	}
 	if cfg.Env != "development" {
 		t.Errorf("Env default = %q, want development", cfg.Env)
@@ -64,8 +67,8 @@ func TestLoad_InvalidDurationFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.JWTTTL != 24*time.Hour {
-		t.Errorf("JWTTTL = %v, want 24h fallback on parse error", cfg.JWTTTL)
+	if cfg.JWTTTL != 15*time.Minute {
+		t.Errorf("JWTTTL = %v, want 15m fallback on parse error", cfg.JWTTTL)
 	}
 }
 

@@ -32,6 +32,8 @@ func NewRouter(deps Deps) *gin.Engine {
 		v1.POST("/auth/login", deps.UserHandler.Login)          // identifier + password
 		v1.POST("/auth/send-code", deps.UserHandler.SendCode)   // request a login code
 		v1.POST("/auth/login/code", deps.UserHandler.LoginCode) // identifier + code
+		v1.POST("/auth/refresh", deps.UserHandler.Refresh)      // rotate refresh → new access
+		v1.POST("/auth/logout", deps.UserHandler.Logout)        // revoke a refresh token
 
 		// Authenticated routes.
 		authed := v1.Group("")
