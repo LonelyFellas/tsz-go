@@ -40,6 +40,8 @@ func NewRouter(deps Deps) *gin.Engine {
 		authed.Use(AuthRequired(deps.TokenManager))
 		{
 			authed.GET("/me", deps.UserHandler.Me)
+			// Revoke every refresh token the user holds (logout everywhere).
+			authed.POST("/auth/logout-all", deps.UserHandler.LogoutAll)
 			// Switch the active role to one the user already holds.
 			authed.POST("/auth/switch-role", deps.UserHandler.SwitchRole)
 			// Acquire an additional identity (e.g. a student who also teaches).

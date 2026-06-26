@@ -40,11 +40,11 @@ func (r *Repository) Create(ctx context.Context, u *User, role Role) error {
 	defer tx.Rollback(ctx) // no-op after a successful commit
 
 	const insertUser = `
-		INSERT INTO users (id, phone, email, password_hash, display_name)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO users (id, phone, email, password_hash, display_name, last_active_role)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING created_at, updated_at`
 
-	err = tx.QueryRow(ctx, insertUser, u.ID, u.Phone, nullable(u.Email), u.PasswordHash, u.DisplayName).
+	err = tx.QueryRow(ctx, insertUser, u.ID, u.Phone, nullable(u.Email), u.PasswordHash, u.DisplayName, role).
 		Scan(&u.CreatedAt, &u.UpdatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
@@ -65,6 +65,18 @@ func (r *Repository) Create(ctx context.Context, u *User, role Role) error {
 		return fmt.Errorf("commit tx: %w", err)
 	}
 	u.Roles = []Role{role}
+	u.LastActiveRole = role
+	return nil
+}
+
+// SetActiveRole records the role a user is now acting as, so it survives a token
+// refresh. Called whenever a new active role is chosen (switch-role / add-role).
+func (r *Repository) SetActiveRole(ctx context.Context, userID uuid.UUID, role Role) error {
+	if _, err := r.db.Exec(ctx,
+		`UPDATE users SET last_active_role = $2, updated_at = now() WHERE id = $1`,
+		userID, role); err != nil {
+		return fmt.Errorf("set active role: %w", err)
+	}
 	return nil
 }
 
@@ -129,21 +141,21 @@ func (r *Repository) HasRole(ctx context.Context, userID uuid.UUID, role Role) (
 
 func (r *Repository) GetByEmail(ctx context.Context, email string) (*User, error) {
 	const q = `
-		SELECT id, phone, email, password_hash, display_name, created_at, updated_at
+		SELECT id, phone, email, password_hash, display_name, last_active_role, created_at, updated_at
 		FROM users WHERE lower(email) = lower($1)`
 	return r.getOne(ctx, q, email)
 }
 
 func (r *Repository) GetByPhone(ctx context.Context, phone string) (*User, error) {
 	const q = `
-		SELECT id, phone, email, password_hash, display_name, created_at, updated_at
+		SELECT id, phone, email, password_hash, display_name, last_active_role, created_at, updated_at
 		FROM users WHERE phone = $1`
 	return r.getOne(ctx, q, phone)
 }
 
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 	const q = `
-		SELECT id, phone, email, password_hash, display_name, created_at, updated_at
+		SELECT id, phone, email, password_hash, display_name, last_active_role, created_at, updated_at
 		FROM users WHERE id = $1`
 	return r.getOne(ctx, q, id)
 }
@@ -151,9 +163,10 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 // getOne scans a single user row and then loads its roles.
 func (r *Repository) getOne(ctx context.Context, query string, arg any) (*User, error) {
 	var u User
-	var email *string // email is nullable
+	var email *string          // email is nullable
+	var lastActiveRole *string // NULL until the first token is issued
 	err := r.db.QueryRow(ctx, query, arg).Scan(
-		&u.ID, &u.Phone, &email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &u.Phone, &email, &u.PasswordHash, &u.DisplayName, &lastActiveRole, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -163,6 +176,9 @@ func (r *Repository) getOne(ctx context.Context, query string, arg any) (*User, 
 	}
 	if email != nil {
 		u.Email = *email
+	}
+	if lastActiveRole != nil {
+		u.LastActiveRole = Role(*lastActiveRole)
 	}
 
 	roles, err := r.loadRoles(ctx, u.ID)

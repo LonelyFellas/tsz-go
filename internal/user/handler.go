@@ -84,7 +84,7 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, RefreshToken: refresh, ActiveRole: string(defaultRole(u.Roles))})
+	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, RefreshToken: refresh, ActiveRole: string(activeRole(u))})
 }
 
 type sendCodeRequest struct {
@@ -131,7 +131,7 @@ func (h *Handler) LoginCode(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, RefreshToken: refresh, ActiveRole: string(defaultRole(u.Roles))})
+	c.JSON(http.StatusOK, authResponse{User: u, AccessToken: access, RefreshToken: refresh, ActiveRole: string(activeRole(u))})
 }
 
 type refreshRequest struct {
@@ -170,6 +170,22 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 
 	if err := h.svc.Logout(c.Request.Context(), req.RefreshToken); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
+	// 204 has no body; flush the status now so it's emitted even with no write.
+	c.Status(http.StatusNoContent)
+	c.Writer.WriteHeaderNow()
+}
+
+// LogoutAll revokes every refresh token the authenticated user holds (logout
+// everywhere), using the user ID from the access token rather than a presented
+// refresh token. Idempotent: a user with no active sessions still returns 204.
+func (h *Handler) LogoutAll(c *gin.Context) {
+	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
+
+	if err := h.svc.LogoutAll(c.Request.Context(), userID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}

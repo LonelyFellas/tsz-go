@@ -205,6 +205,42 @@ func TestService_Revoke_Idempotent(t *testing.T) {
 	}
 }
 
+func TestService_RevokeAll(t *testing.T) {
+	svc, store := newTestService()
+	ctx := context.Background()
+	alice, bob := uuid.New(), uuid.New()
+
+	// Seed alice with two tokens (bypass Issue's single-device revoke so we can
+	// prove RevokeAll clears *all* of them, not just the latest).
+	a1, _ := svc.issue(ctx, alice)
+	a2, _ := svc.issue(ctx, alice)
+	bobTok, _ := svc.Issue(ctx, bob)
+
+	if err := svc.RevokeAll(ctx, alice); err != nil {
+		t.Fatalf("revoke all: %v", err)
+	}
+	if n := store.activeForUser(alice); n != 0 {
+		t.Errorf("alice active tokens = %d, want 0", n)
+	}
+	// both of alice's tokens are dead
+	for _, tok := range []string{a1, a2} {
+		if _, _, err := svc.Rotate(ctx, tok); !errors.Is(err, ErrInvalidRefreshToken) {
+			t.Errorf("rotate revoked token err = %v, want ErrInvalidRefreshToken", err)
+		}
+	}
+	// bob is untouched
+	if _, _, err := svc.Rotate(ctx, bobTok); err != nil {
+		t.Errorf("bob's token should survive alice's logout-all, got %v", err)
+	}
+	// idempotent: revoking again (or for a user with no tokens) is fine
+	if err := svc.RevokeAll(ctx, alice); err != nil {
+		t.Errorf("second revoke all: %v", err)
+	}
+	if err := svc.RevokeAll(ctx, uuid.New()); err != nil {
+		t.Errorf("revoke all for unknown user: %v", err)
+	}
+}
+
 func TestService_Issue_SaveError(t *testing.T) {
 	store := newFakeStore()
 	store.saveErr = errors.New("db down")

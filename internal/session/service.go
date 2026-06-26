@@ -119,6 +119,15 @@ func (s *Service) Revoke(ctx context.Context, rawRefreshToken string) error {
 	return nil
 }
 
+// RevokeAll invalidates every refresh token a user holds (logout everywhere).
+// Like Revoke it is idempotent: a user with no active tokens is not an error.
+func (s *Service) RevokeAll(ctx context.Context, userID uuid.UUID) error {
+	if err := s.store.RevokeAllForUser(ctx, userID); err != nil {
+		return fmt.Errorf("revoke all refresh tokens: %w", err)
+	}
+	return nil
+}
+
 // issue generates a fresh random token, stores its hash, and returns the raw
 // secret. It does not revoke anything — callers decide the single-device policy.
 func (s *Service) issue(ctx context.Context, userID uuid.UUID) (string, error) {

@@ -33,6 +33,11 @@ type User struct {
 	PasswordHash string    `json:"-"` // never serialized
 	DisplayName  string    `json:"display_name"`
 	Roles        []Role    `json:"roles"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	// LastActiveRole is the role the most recently issued token acts as. It is
+	// resumed on login and refresh so a switch-role survives token expiry. Empty
+	// until the first token is issued; callers fall back to the default role (see
+	// activeRole). Not serialized — the active role travels in auth responses.
+	LastActiveRole Role      `json:"-"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
