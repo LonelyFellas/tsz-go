@@ -121,6 +121,11 @@ untouched, so a role change takes effect within at most one access TTL.
 
 ## API
 
+Full reference: [docs/api.md](docs/api.md). Interactive docs (Swagger UI) are
+served at **`/docs`** when `DOCS_ENABLED=true` (default), backed by the OpenAPI
+spec at [docs/openapi.yaml](docs/openapi.yaml) (also reachable at
+`/docs/openapi.yaml`). Set `DOCS_ENABLED=false` to hide them in production.
+
 ```bash
 # register — phone + role required; email optional
 curl -X POST localhost:8080/api/v1/auth/register \

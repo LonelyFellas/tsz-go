@@ -5,6 +5,7 @@ REST API for the tsz-go backend. All endpoints are JSON over HTTP.
 - **Base URL:** `http://<host>:<port>` (e.g. `http://localhost:8080`)
 - **API prefix:** `/api/v1`
 - **Content-Type:** `application/json` for all request bodies.
+- **Interactive docs:** Swagger UI at `/docs`, OpenAPI spec at `/docs/openapi.yaml` (source: [openapi.yaml](openapi.yaml)). Disable with `DOCS_ENABLED=false`.
 
 ## Authentication
 
@@ -182,9 +183,13 @@ Returned by register / login / login-with-code:
 {
   "user": { /* User */ },
   "access_token": "jwt...",
-  "active_role": "student"
+  "active_role": "student",
+  "expires_in": 900,
+  "refresh_token_expires_at": 1719400000
 }
 ```
+
+`expires_in` — access-token lifetime in seconds. `refresh_token_expires_at` — refresh-token expiry as a Unix timestamp (seconds).
 
 > The refresh token is **not** in the body — it is set as an HttpOnly cookie via the `Set-Cookie` response header (see [Authentication](#authentication)).
 
@@ -297,7 +302,11 @@ Exchange the refresh-token cookie for a new access token + **rotated** refresh t
 
 **200**
 ```json
-{ "access_token": "jwt..." }
+{
+  "access_token": "jwt...",
+  "expires_in": 900,
+  "refresh_token_expires_at": 1719400000
+}
 ```
 > The rotated refresh token is returned via a fresh `Set-Cookie` header; the previous one is now invalid. Nothing to read or store on the frontend.
 

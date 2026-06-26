@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/darwish/tsz-go/docs"
 	"github.com/darwish/tsz-go/internal/auth"
 	"github.com/darwish/tsz-go/internal/config"
 	"github.com/darwish/tsz-go/internal/otp"
@@ -80,6 +81,8 @@ func run() error {
 	router := httpserver.NewRouter(httpserver.Deps{
 		TokenManager: tokenManager,
 		UserHandler:  userHandler,
+		OpenAPISpec:  docs.OpenAPISpec,
+		EnableDocs:   cfg.DocsEnabled,
 	})
 
 	srv := &http.Server{
