@@ -49,7 +49,7 @@ func buildRealRouter(t *testing.T) (http.Handler, *otp.MockSender) {
 	sessionSvc := session.NewService(session.NewRepository(pool), time.Hour)
 	repo := user.NewRepository(pool)
 	svc := user.NewService(repo, tm, otpSvc, sessionSvc)
-	return NewRouter(Deps{TokenManager: tm, UserHandler: user.NewHandler(svc, user.CookieConfig{MaxAge: time.Hour})}), sender
+	return NewRouter(Deps{TokenManager: tm, UserHandler: user.NewHandler(svc, user.CookieConfig{MaxAge: time.Hour}, 15*time.Minute, time.Hour)}), sender
 }
 
 // refreshCookieFrom pulls the refresh_token cookie value out of a response. The
