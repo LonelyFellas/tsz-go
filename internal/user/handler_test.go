@@ -293,6 +293,119 @@ func TestHandler_InternalErrors(t *testing.T) {
 	})
 }
 
+// doJSONAuthed is like doJSON but injects a userID into the gin context to
+// simulate a request that has already passed AuthRequired middleware.
+func doJSONAuthed(t *testing.T, h gin.HandlerFunc, body string, userID uuid.UUID) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(auth.ContextUserIDKey, userID)
+	h(c)
+	return w
+}
+
+func TestHandler_SwitchRole(t *testing.T) {
+	h, _, _, _, tm := newTestHandler()
+	// seed a student; register returns a student token
+	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register status = %d", w.Code)
+	}
+	m := decode(t, w)
+	access, _ := m["access_token"].(string)
+	claims, err := tm.Parse(access)
+	if err != nil {
+		t.Fatalf("parse token: %v", err)
+	}
+	userID := claims.UserID
+
+	t.Run("200 valid role switch", func(t *testing.T) {
+		w := doJSONAuthed(t, h.SwitchRole, `{"role":"student"}`, userID)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body)
+		}
+		m := decode(t, w)
+		if m["active_role"] != "student" {
+			t.Errorf("active_role = %v, want student", m["active_role"])
+		}
+		if token, _ := m["access_token"].(string); token == "" {
+			t.Error("response missing access_token")
+		}
+	})
+
+	t.Run("403 user does not hold the role", func(t *testing.T) {
+		w := doJSONAuthed(t, h.SwitchRole, `{"role":"teacher"}`, userID)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 (body: %s)", w.Code, w.Body)
+		}
+	})
+
+	t.Run("400 missing role field", func(t *testing.T) {
+		w := doJSONAuthed(t, h.SwitchRole, `{}`, userID)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("400 invalid role value", func(t *testing.T) {
+		w := doJSONAuthed(t, h.SwitchRole, `{"role":"admin"}`, userID)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+}
+
+func TestHandler_AddRole(t *testing.T) {
+	h, _, _, _, tm := newTestHandler()
+	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register status = %d", w.Code)
+	}
+	claims, err := tm.Parse(decode(t, w)["access_token"].(string))
+	if err != nil {
+		t.Fatalf("parse token: %v", err)
+	}
+	userID := claims.UserID
+
+	t.Run("201 new role added", func(t *testing.T) {
+		w := doJSONAuthed(t, h.AddRole, `{"role":"teacher"}`, userID)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201 (body: %s)", w.Code, w.Body)
+		}
+		m := decode(t, w)
+		if m["active_role"] != "teacher" {
+			t.Errorf("active_role = %v, want teacher", m["active_role"])
+		}
+		if token, _ := m["access_token"].(string); token == "" {
+			t.Error("response missing access_token")
+		}
+	})
+
+	t.Run("409 user already has role", func(t *testing.T) {
+		// student role was set at register; adding it again → 409
+		w := doJSONAuthed(t, h.AddRole, `{"role":"student"}`, userID)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 (body: %s)", w.Code, w.Body)
+		}
+	})
+
+	t.Run("400 missing role field", func(t *testing.T) {
+		w := doJSONAuthed(t, h.AddRole, `{}`, userID)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("400 invalid role value", func(t *testing.T) {
+		w := doJSONAuthed(t, h.AddRole, `{"role":"superuser"}`, userID)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+}
+
 func TestHandler_Me(t *testing.T) {
 	h, store, _, _, _ := newTestHandler()
 
