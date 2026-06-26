@@ -38,10 +38,10 @@ type CookieConfig struct {
 // Handler adapts HTTP requests to the Service. It owns request/response shapes
 // and validation; all business rules live in the Service.
 type Handler struct {
-	svc              *Service
-	cookie           CookieConfig
-	accessTokenTTL   time.Duration
-	refreshTokenTTL  time.Duration
+	svc             *Service
+	cookie          CookieConfig
+	accessTokenTTL  time.Duration
+	refreshTokenTTL time.Duration
 }
 
 func NewHandler(svc *Service, cookie CookieConfig, accessTokenTTL, refreshTokenTTL time.Duration) *Handler {
@@ -87,11 +87,11 @@ type registerRequest struct {
 // access token. The refresh token is NOT in the body — it is delivered out of
 // band as an HttpOnly cookie (see setRefreshCookie) so JS can't touch it.
 type authResponse struct {
-	User                   *User  `json:"user"`
-	AccessToken            string `json:"access_token"`
-	ActiveRole             string `json:"active_role"`
-	ExpiresIn              int64  `json:"expires_in"`               // access token TTL in seconds
-	RefreshTokenExpiresAt  int64  `json:"refresh_token_expires_at"` // Unix timestamp (seconds)
+	User                  *User  `json:"user"`
+	AccessToken           string `json:"access_token"`
+	ActiveRole            string `json:"active_role"`
+	ExpiresIn             int64  `json:"expires_in"`               // access token TTL in seconds
+	RefreshTokenExpiresAt int64  `json:"refresh_token_expires_at"` // Unix timestamp (seconds)
 }
 
 func (h *Handler) Register(c *gin.Context) {
