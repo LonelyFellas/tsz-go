@@ -54,6 +54,18 @@ func newToken(userID uuid.UUID, hash string, expires time.Time) *Token {
 	return &Token{ID: uuid.New(), UserID: userID, TokenHash: hash, ExpiresAt: expires}
 }
 
+// TestStoreContract_Postgres runs the shared Store contract (contract_test.go)
+// against the real Postgres Repository, holding the fake and the database to the
+// same behaviour. seedUser satisfies the refresh_tokens → users foreign key.
+func TestStoreContract_Postgres(t *testing.T) {
+	pool := newTestPool(t)
+	repo := NewRepository(pool)
+	runStoreContract(t,
+		func() Store { return repo },
+		func() uuid.UUID { return seedUser(t, pool) },
+	)
+}
+
 func TestRepository_SaveFindRevoke(t *testing.T) {
 	pool := newTestPool(t)
 	repo := NewRepository(pool)

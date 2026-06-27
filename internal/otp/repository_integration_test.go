@@ -36,6 +36,14 @@ func newTestRepo(t *testing.T) *Repository {
 
 func uniqueTarget() string { return "it-" + uuid.NewString() }
 
+// TestStoreContract_Postgres runs the shared Store contract (contract_test.go)
+// against the real Postgres Repository, holding the fake and the database to the
+// same behaviour.
+func TestStoreContract_Postgres(t *testing.T) {
+	repo := newTestRepo(t)
+	runStoreContract(t, func() Store { return repo })
+}
+
 func TestRepository_SaveLatestConsume(t *testing.T) {
 	repo := newTestRepo(t)
 	ctx := context.Background()
