@@ -14,6 +14,54 @@ const (
 	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
 )
 
+// Defines values for CEFRLevel.
+const (
+	A1 CEFRLevel = "A1"
+	A2 CEFRLevel = "A2"
+	B1 CEFRLevel = "B1"
+	B2 CEFRLevel = "B2"
+	C1 CEFRLevel = "C1"
+	C2 CEFRLevel = "C2"
+)
+
+// Valid indicates whether the value is a known member of the CEFRLevel enum.
+func (e CEFRLevel) Valid() bool {
+	switch e {
+	case A1:
+		return true
+	case A2:
+		return true
+	case B1:
+		return true
+	case B2:
+		return true
+	case C1:
+		return true
+	case C2:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for EnglishVariant.
+const (
+	AmE EnglishVariant = "AmE"
+	BrE EnglishVariant = "BrE"
+)
+
+// Valid indicates whether the value is a known member of the EnglishVariant enum.
+func (e EnglishVariant) Valid() bool {
+	switch e {
+	case AmE:
+		return true
+	case BrE:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for Role.
 const (
 	Student Role = "student"
@@ -32,16 +80,37 @@ func (e Role) Valid() bool {
 	}
 }
 
+// CEFRLevel Learner difficulty band (CEFR), A1 easiest … C2 hardest.
+type CEFRLevel string
+
+// EnglishVariant Accent and spelling convention — British or American.
+type EnglishVariant string
+
 // Error defines model for Error.
 type Error struct {
 	// Error Human-readable message.
 	Error string `json:"error"`
 }
 
+// LearningSettings A learner's two onboarding choices; both are always set together.
+type LearningSettings struct {
+	// CefrLevel Learner difficulty band (CEFR), A1 easiest … C2 hardest.
+	CefrLevel CEFRLevel `json:"cefr_level"`
+
+	// EnglishVariant Accent and spelling convention — British or American.
+	EnglishVariant EnglishVariant `json:"english_variant"`
+}
+
 // MeResponse defines model for MeResponse.
 type MeResponse struct {
 	ActiveRole Role `json:"active_role"`
-	User       User `json:"user"`
+
+	// LearningSettings Null until the learner finishes onboarding.
+	LearningSettings *LearningSettings `json:"learning_settings,omitempty"`
+
+	// Onboarded Server-derived — true once learning_settings is set. Clients read this rather than re-deriving from null.
+	Onboarded bool `json:"onboarded"`
+	User      User `json:"user"`
 }
 
 // Role defines model for Role.
