@@ -97,6 +97,11 @@ internal/
 ├── question/       # 题库
 ├── learning/       # 学习集、会话、学习模型引擎
 ├── progress/       # 学习统计、教师报告
+├── task/           # 任务下发、完成统计
+├── review/         # 审核状态机（词表 / 教师申请 / 评论）
+├── wallet/         # 天生币账本、发放/扣除、排行
+├── stats/          # 后台首页数据聚合
+├── audit/          # 后台敏感操作审计日志
 ├── integration/    # 词典、COCA、科大讯飞 TTS
 ├── media/          # 音频、OSS
 └── platform/
@@ -113,6 +118,11 @@ internal/
 | `question` | 选择/填空/完形/阅读等题型 |
 | `learning` | 学习模型调度、当前学习集、答题记录 |
 | `progress` | 学员统计；教师报告仅限本人布置的词表 |
+| `task` | 学习任务下发、班级完成率统计 |
+| `review` | 共享审核状态机：词表、教师入驻申请、评论 |
+| `wallet` | 天生币不可变账本、发放/扣除、教师排行 |
+| `stats` | 后台首页各类计数（累计/今日/近 N 日）聚合 |
+| `audit` | 后台敏感操作留痕（发币、审核、删用户…） |
 | `integration` | 外部 API 防腐层 |
 | `media` | TTS 任务、音频存储 |
 
@@ -224,7 +234,101 @@ QuestionBank ──< Question
 
 ---
 
-## 9. 前端建议
+## 9. 管理后台（审核 / 天生币 / 审计 / 看板）
+
+管理后台与学员端、教师端共用**同一套 tsz-go API 与数据库**，不拆独立服务。
+后台接口统一挂在 `/api/v1/admin/...`，由 admin 鉴权中间件保护。
+
+```
+                /api/v1/admin/...
+        ┌───────────────┬───────────────┬──────────────┐
+     用户/班级       审核管理        天生币管理      首页数据
+   user / class    review          wallet          stats
+        │             │               │ + audit        │
+        └─────────────┴───────────────┴────────────────┘
+                        同一 PostgreSQL
+```
+
+### 9.1 后台权限
+
+原型「审核管理」为独立菜单，意味着可能存在**专职审核员 ≠ 超管**。但初期不上完整 RBAC：
+
+- 新增角色 `admin`（现仅 `student` / `teacher`）
+- 加权限点枚举列：`user_admin`、`review`、`coin`、`content`、`setting`
+- 中间件按**权限点**校验，而非只看角色；不够用再演进为角色-权限表
+- 后台可见学员联系方式（教师端仍脱敏，见第 7 节）
+
+### 9.2 审核管理（review）
+
+词表审核、教师入驻申请、评论审核三者流程一致：`pending → approved | rejected`。
+
+**设计取舍：** 不建「万能多态审核表」（`target_type + target_id` 破坏外键完整性、查询困难）。
+改为**各业务实体自带审核字段**，状态流转逻辑抽到共享 `review` 包复用：
+
+```
+<entity>.status         pending | approved | rejected
+<entity>.reviewed_by    admin user id
+<entity>.reviewed_at    timestamptz
+<entity>.reject_reason  text
+```
+
+| 审核对象 | 触发来源 | 通过后果 |
+|---------|---------|---------|
+| 词表 | 教师/用户提交自定义词表 | 词表对班级/公开可见 |
+| 教师入驻申请 | 用户申请成为教师 | 账号获得 `teacher` 角色 |
+| 评论 | 用户发表评论 | 评论公开展示 |
+
+每次审核动作写一条 `audit`（见 9.4）。
+
+### 9.3 天生币（wallet）——账本优先
+
+天生币是**类货币资产**，有发放/扣除、并需「教师持币排行 TOP 10」。
+
+**硬约束：余额不可用一个 `balance` 列直接 `UPDATE`。** 真相是不可变流水账本：
+
+```
+coin_ledger（只追加，不修改 / 删除）
+  ├── account_id      持有者（user）
+  ├── delta           变动量（发放为正，扣除为负）
+  ├── type            grant | deduct | reward | consume | ...
+  ├── ref_type/ref_id 关联业务（任务、订单…）
+  ├── operator_id     操作的 admin（系统发放为 null）
+  ├── idempotency_key 幂等键，唯一约束，防重复发放
+  └── created_at
+```
+
+- **余额** = 账本对 `account_id` 求和；高频读可加带版本号的缓存余额列，但账本永远是源
+- **发放/扣除** 在单事务内写账本（+ 可选更新缓存余额），失败整体回滚
+- **幂等**：同一 `idempotency_key` 重复提交不二次入账
+- **排行榜** = 账本按 `account_id` 聚合，配合教师角色过滤；量大后落每日快照表
+- 所有发放/扣除写 `audit`
+
+### 9.4 审计日志（audit）
+
+发币、审核、删改用户等敏感操作必须可追溯——处理货币与内容审核的系统无审计不合规。
+
+```
+admin_audit_log
+  ├── actor_id    操作的 admin
+  ├── action      coin.grant | review.approve | user.delete | ...
+  ├── target      ref_type + ref_id
+  ├── detail      jsonb（变更前后 / 金额 / 理由）
+  └── created_at
+```
+
+只追加；后台提供按 actor / action / 时间范围的查询。
+
+### 9.5 首页数据（stats）
+
+累计 / 今日 / 近三日 / 近 7 日 / 本周 / 本月 等计数（用户、任务、词库、天生币）。
+
+- **当前规模直接 `COUNT(*) + 时间窗口` 查询即可**，不提前上物化视图
+- 各卡片对应一个聚合查询，`stats` 模块统一编排返回
+- 后期慢了再加：每日汇总表（rollup）或读副本（见第 11 节），天生币排行可走 9.3 的快照表
+
+---
+
+## 10. 前端建议
 
 | 端 | 技术方向 |
 |----|----------|
@@ -234,7 +338,7 @@ QuestionBank ──< Question
 
 ---
 
-## 10. 外部集成
+## 11. 外部集成
 
 | 集成 | 方式 |
 |------|------|
@@ -245,7 +349,7 @@ QuestionBank ──< Question
 
 ---
 
-## 11. 部署
+## 12. 部署
 
 **当前：** Docker Compose（app + postgres + migrate）
 
@@ -256,7 +360,7 @@ QuestionBank ──< Question
 
 ---
 
-## 12. 实施路线
+## 13. 实施路线
 
 ### Phase 1 — 基础
 
@@ -279,14 +383,22 @@ QuestionBank ──< Question
 - [ ] 题库
 - [ ] 会员（未绑班用户）
 
-### Phase 4 — 规模化
+### Phase 4 — 管理后台
+
+- [ ] `admin` 角色 + 权限点中间件
+- [ ] 审核管理（词表 / 教师申请 / 评论）
+- [ ] 天生币账本 + 发放/扣除 + 排行
+- [ ] 审计日志
+- [ ] 首页数据看板
+
+### Phase 5 — 规模化
 
 - [ ] Redis + asynq
 - [ ] 读副本、报表导出
 
 ---
 
-## 13. 与现有代码衔接
+## 14. 与现有代码衔接
 
 1. `make migrate-create name=...`
 2. 新建 `internal/<domain>/`（参考 `internal/user/`）
@@ -298,7 +410,7 @@ Repository 可后续换 [sqlc](https://sqlc.dev)，service 接口不变。
 
 ---
 
-## 14. 总结
+## 15. 总结
 
 | 项 | 结论 |
 |----|------|

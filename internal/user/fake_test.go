@@ -49,10 +49,51 @@ func (f *fakeStore) Create(_ context.Context, u *User, role Role) error {
 	}
 	u.Roles = []Role{role}
 	u.LastActiveRole = role
+	if u.Status == "" {
+		u.Status = StatusActive // mirror the DB column default
+	}
 	// copy to avoid callers mutating stored state
 	cp := *u
 	f.byID[u.ID] = &cp
 	f.roles[u.ID] = map[Role]bool{role: true}
+	return nil
+}
+
+func (f *fakeStore) CreateAdmin(_ context.Context, u *User) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, existing := range f.byID {
+		if existing.Phone == u.Phone {
+			return ErrPhoneTaken
+		}
+		if u.Email != "" && strings.EqualFold(existing.Email, u.Email) {
+			return ErrEmailTaken
+		}
+	}
+	if u.Status == "" {
+		u.Status = StatusActive // mirror the DB column default
+	}
+	u.Roles = []Role{RoleAdmin}
+	// copy to avoid callers mutating stored state
+	cp := *u
+	f.byID[u.ID] = &cp
+	f.roles[u.ID] = map[Role]bool{RoleAdmin: true}
+	return nil
+}
+
+func (f *fakeStore) AddAdminRole(_ context.Context, userID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.roles[userID][RoleAdmin] {
+		return ErrRoleTaken
+	}
+	if f.roles[userID] == nil {
+		f.roles[userID] = make(map[Role]bool)
+	}
+	f.roles[userID][RoleAdmin] = true
+	if u := f.byID[userID]; u != nil {
+		u.Roles = append(u.Roles, RoleAdmin)
+	}
 	return nil
 }
 

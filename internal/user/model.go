@@ -15,12 +15,28 @@ type Role string
 const (
 	RoleStudent Role = "student"
 	RoleTeacher Role = "teacher"
+	// RoleAdmin is the back-office role. It gates the /api/v1/admin/* API and is
+	// never self-assignable: registration stays limited to student/teacher and the
+	// first admin is bootstrapped out of band (see cmd/seed).
+	RoleAdmin Role = "admin"
 )
 
-// Valid reports whether r is a known role.
+// Valid reports whether r is a known role. RoleAdmin is valid here (e.g. for the
+// admin gate), but Register independently restricts the roles a user may grant
+// themselves to student/teacher — see RegisterRequest's binding tag.
 func (r Role) Valid() bool {
-	return r == RoleStudent || r == RoleTeacher
+	return r == RoleStudent || r == RoleTeacher || r == RoleAdmin
 }
+
+// UserStatus is an account's lifecycle state. A disabled account is rejected at
+// the login boundary (password/code login and refresh), so disabling takes
+// effect within one access-token TTL.
+type UserStatus string
+
+const (
+	StatusActive   UserStatus = "active"
+	StatusDisabled UserStatus = "disabled"
+)
 
 // User is the authentication identity. It is role-agnostic; the roles it holds
 // are loaded into Roles, and the role it is currently acting as travels in the
@@ -32,7 +48,10 @@ type User struct {
 	Email        string    `json:"email,omitempty"`
 	PasswordHash string    `json:"-"` // never serialized
 	DisplayName  string    `json:"display_name"`
-	Roles        []Role    `json:"roles"`
+	// Status is the account lifecycle state (active/disabled). Defaults to active
+	// at the database layer; a disabled account cannot log in or refresh.
+	Status UserStatus `json:"status"`
+	Roles  []Role     `json:"roles"`
 	// LastActiveRole is the role the most recently issued token acts as. It is
 	// resumed on login and refresh so a switch-role survives token expiry. Empty
 	// until the first token is issued; callers fall back to the default role (see

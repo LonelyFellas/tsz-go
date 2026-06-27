@@ -2,6 +2,7 @@ package user
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -694,6 +695,110 @@ func TestHandler_UpdateLearningSettings(t *testing.T) {
 		w := doJSONAuthed(t, h.UpdateLearningSettings, `{"cefr_level":"B1","english_variant":"AmE"}`, teacher)
 		if w.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409", w.Code)
+		}
+	})
+}
+
+// doGetAuthed drives a GET handler with both the userID and active role injected
+// into context, simulating a request that has already passed AuthRequired (and,
+// for admin routes, RequireRole).
+func doGetAuthed(t *testing.T, h gin.HandlerFunc, userID uuid.UUID, role string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	c.Set(auth.ContextUserIDKey, userID)
+	c.Set(auth.ContextRoleKey, role)
+	h(c)
+	return w
+}
+
+// AdminProfile returns the signed-in admin's identity. The 401/403 cases are the
+// middleware's job, so here we exercise the 200 (identity shaped per contract)
+// and 404 (account vanished) branches the handler owns.
+func TestHandler_AdminProfile(t *testing.T) {
+	t.Run("200 returns identity", func(t *testing.T) {
+		h, store, _, _, _ := newTestHandler()
+		ctx := context.Background()
+		admin, err := h.svc.SeedAdmin(ctx, "13800138000", "adminpass123", "Administrator")
+		if err != nil {
+			t.Fatalf("seed admin: %v", err)
+		}
+		_ = store
+
+		w := doGetAuthed(t, h.AdminProfile, admin.ID, string(RoleAdmin))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		body := decode(t, w)
+		if body["id"] != admin.ID.String() {
+			t.Errorf("id = %v, want %s", body["id"], admin.ID)
+		}
+		if body["phone"] != "13800138000" {
+			t.Errorf("phone = %v, want 13800138000", body["phone"])
+		}
+		if body["display_name"] != "Administrator" {
+			t.Errorf("display_name = %v, want Administrator", body["display_name"])
+		}
+		if body["active_role"] != "admin" {
+			t.Errorf("active_role = %v, want admin", body["active_role"])
+		}
+		roles, _ := body["roles"].([]any)
+		if len(roles) != 1 || roles[0] != "admin" {
+			t.Errorf("roles = %v, want [admin]", body["roles"])
+		}
+	})
+
+	t.Run("404 when account is gone", func(t *testing.T) {
+		h, _, _, _, _ := newTestHandler()
+		w := doGetAuthed(t, h.AdminProfile, uuid.New(), string(RoleAdmin))
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", w.Code)
+		}
+	})
+}
+
+// Login must reject a disabled account with 403 account disabled, for both
+// password and code login.
+func TestHandler_Login_Disabled(t *testing.T) {
+	seedDisabled := func(t *testing.T, h *Handler, store *fakeStore) {
+		t.Helper()
+		w := doJSON(t, h.Register, `{"phone":"13800138000","email":"d@b.com","password":"password123","display_name":"D","role":"student"}`)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("seed register status = %d", w.Code)
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		for _, u := range store.byID {
+			u.Status = StatusDisabled
+		}
+	}
+
+	t.Run("password login", func(t *testing.T) {
+		h, store, _, _, _ := newTestHandler()
+		seedDisabled(t, h, store)
+		w := doJSON(t, h.Login, `{"identifier":"d@b.com","password":"password123"}`)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", w.Code)
+		}
+		if body := decode(t, w); body["error"] != "account disabled" {
+			t.Errorf("error = %v, want 'account disabled'", body["error"])
+		}
+	})
+
+	t.Run("code login", func(t *testing.T) {
+		h, store, codes, _, _ := newTestHandler()
+		seedDisabled(t, h, store)
+		if w := doJSON(t, h.SendCode, `{"identifier":"d@b.com"}`); w.Code != http.StatusOK {
+			t.Fatalf("send-code status = %d, want 200", w.Code)
+		}
+		code := codes.codes["d@b.com"]
+		w := doJSON(t, h.LoginCode, `{"identifier":"d@b.com","code":"`+code+`"}`)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", w.Code)
+		}
+		if body := decode(t, w); body["error"] != "account disabled" {
+			t.Errorf("error = %v, want 'account disabled'", body["error"])
 		}
 	})
 }
