@@ -330,13 +330,20 @@ async function bootstrapAdmin() {
 ## 12. 后续待办 / 硬化项（合并后未做，勿忘）
 
 > 双身份核心已于 PR #22 合并上线。以下为评审时识别、当时**有意推迟**的项,按优先级排列。
+> 每条都标了**状态**与**触发条件（何时再做）**,避免遗忘。
 
 ### 12.1 部署前必做（生产阻断项）
-- [ ] 将 `JWT_SECRET` 与 `ADMIN_JWT_SECRET` 从 `docker-compose.yml` 里的 `change-me-…` 占位值换成**真随机长串**;两者**必须不同**,否则服务拒绝启动(`internal/config`)。
+- [ ] **替换生产密钥** —— 状态:**未做,留待上线**。将 `JWT_SECRET` 与 `ADMIN_JWT_SECRET` 从 `docker-compose.yml` 里的 `change-me-…` 占位值换成**真随机长串**;两者**必须不同**,否则服务拒绝启动(`internal/config`)。
+  - **触发条件**:**部署到真实服务器前必做**(本地/测试环境用占位值无妨)。这是上线检查清单的硬性一项,漏了等于把后台签名密钥公开。
 
-### 12.2 健壮性硬化（可选,非阻断）
-- [ ] **最后超管守卫的 TOCTOU 竞态**:`Service.SetStatus` / `isLastActiveSuperAdmin`(`internal/admin/service.go`)是「先读后写」两步、无事务/锁。两个并发禁用请求理论上可同时通过检查 → 最终 0 个活跃超管。后台基本单运营者,概率极低。彻底堵死的做法:用一条带条件的原子 `UPDATE … WHERE NOT(是最后一个活跃超管)` 让 DB 层判断,或加 DB 约束。
-- [ ] **`Limit: 1000` 魔法上限**:`isLastActiveSuperAdmin` 用翻页数超管,超过 1000 个会截断。改为专用 `CountActiveSuperAdmins(ctx)` 计数查询更准更省。
+### 12.2 健壮性硬化（可选,非阻断 —— 评估后暂不做）
+> 决策:当前为**单运营者后台**,以下均为理论风险,概率极低;为避免引入复杂度(尤其是内存 fake 需镜像 DB 原子语义)**暂不实现**,仅记录。下列触发条件出现时再做。
+- [ ] **最后超管守卫的 TOCTOU 竞态** —— 状态:**暂不做**。`Service.SetStatus` / `isLastActiveSuperAdmin`(`internal/admin/service.go`)是「先读后写」两步、无事务/锁;两个并发禁用请求理论上可同时通过检查 → 最终 0 个活跃超管。
+  - **触发条件**:当后台出现**多个超管并发操作**(多运营团队),或上线后对账号管理的并发正确性有硬性要求时再做。
+  - **做法**:DB 层带条件的原子 `UPDATE … WHERE NOT(是最后一个活跃超管)`;`RowsAffected=0` 时再查一次区分 404(不存在)/409(守卫拦下);`fakeStore` 同步镜像该原子语义 + 补并发测试。约 +40~50 行。
+- [ ] **`Limit: 1000` 魔法上限** —— 状态:**暂不做（基本不会触发）**。`isLastActiveSuperAdmin` 用翻页数超管,超过 1000 个会截断。
+  - **触发条件**:超管数量级有可能逼近 1000 时(现实几乎不可能)。
+  - **做法**:改为专用 `CountActiveSuperAdmins(ctx)` 计数查询,更准更省。可与上一条一并做。
 
 ### 12.3 测试补强
 - [x] **handler 层 409/404 映射断言**:已补 `internal/admin/handler_test.go`(`TestHandler_SetAdminStatus`,表驱动覆盖 200/404/409/400)。`SetAdminStatus` 的 `ErrLastSuperAdmin→409`、`ErrNotFound→404`、非法 id/status→400 均有断言。
