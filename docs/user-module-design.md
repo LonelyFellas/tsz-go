@@ -338,5 +338,5 @@ async function bootstrapAdmin() {
 - [ ] **最后超管守卫的 TOCTOU 竞态**:`Service.SetStatus` / `isLastActiveSuperAdmin`(`internal/admin/service.go`)是「先读后写」两步、无事务/锁。两个并发禁用请求理论上可同时通过检查 → 最终 0 个活跃超管。后台基本单运营者,概率极低。彻底堵死的做法:用一条带条件的原子 `UPDATE … WHERE NOT(是最后一个活跃超管)` 让 DB 层判断,或加 DB 约束。
 - [ ] **`Limit: 1000` 魔法上限**:`isLastActiveSuperAdmin` 用翻页数超管,超过 1000 个会截断。改为专用 `CountActiveSuperAdmins(ctx)` 计数查询更准更省。
 
-### 12.3 测试补强（可选）
-- [ ] **handler 层缺 409/404 映射断言**:`SetAdminStatus`(`internal/admin/handler.go`)里 `ErrLastSuperAdmin→409`、`ErrNotFound→404` 的 HTTP 映射,service 与 middleware 都测了,但 handler 级没有直接断言。补一个表驱动 handler 测试。
+### 12.3 测试补强
+- [x] **handler 层 409/404 映射断言**:已补 `internal/admin/handler_test.go`(`TestHandler_SetAdminStatus`,表驱动覆盖 200/404/409/400)。`SetAdminStatus` 的 `ErrLastSuperAdmin→409`、`ErrNotFound→404`、非法 id/status→400 均有断言。
