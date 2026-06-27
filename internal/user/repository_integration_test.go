@@ -11,10 +11,8 @@ package user
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -41,11 +39,19 @@ func newTestRepo(t *testing.T) *Repository {
 
 func uniqueEmail() string { return "it-" + uuid.NewString() + "@example.com" }
 
-var phoneSeq int64
+// uniquePhone returns a globally-unique 11-digit phone. It delegates to
+// randPhone (contract_test.go) so it stays unique across runs against the shared,
+// never-truncated test DB — a per-process counter would collide with rows left
+// behind by earlier runs.
+func uniquePhone() string { return randPhone() }
 
-// uniquePhone returns a distinct 11-digit phone for each call so tests never
-// collide on the unique phone index.
-func uniquePhone() string { return fmt.Sprintf("1%010d", atomic.AddInt64(&phoneSeq, 1)) }
+// TestStoreContract_Postgres runs the shared Store contract (defined in
+// contract_test.go) against the real Postgres-backed Repository, so the fake and
+// the database are held to exactly the same behaviour.
+func TestStoreContract_Postgres(t *testing.T) {
+	repo := newTestRepo(t)
+	runStoreContract(t, func() Store { return repo })
+}
 
 func TestRepository_CreateAndGet(t *testing.T) {
 	repo := newTestRepo(t)
