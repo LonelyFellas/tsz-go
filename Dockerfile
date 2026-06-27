@@ -2,6 +2,9 @@
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 
+ENV GOPROXY=https://goproxy.cn,direct \
+    GOSUMDB=off
+
 COPY go.mod go.sum ./
 RUN go mod download
 
