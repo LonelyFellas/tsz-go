@@ -13,9 +13,10 @@ import (
 )
 
 var (
-	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrInvalidRole        = errors.New("invalid role")
-	ErrRoleNotOwned       = errors.New("user does not have this role")
+	ErrInvalidCredentials      = errors.New("invalid credentials")
+	ErrInvalidRole             = errors.New("invalid role")
+	ErrRoleNotOwned            = errors.New("user does not have this role")
+	ErrInvalidLearningSettings = errors.New("invalid learning settings")
 )
 
 // codePurposeLogin is the verification-code purpose for code-based login.
@@ -32,6 +33,8 @@ type Store interface {
 	HasRole(ctx context.Context, userID uuid.UUID, role Role) (bool, error)
 	AddRole(ctx context.Context, userID uuid.UUID, role Role) error
 	SetActiveRole(ctx context.Context, userID uuid.UUID, role Role) error
+	GetLearningSettings(ctx context.Context, userID uuid.UUID) (*LearningSettings, error)
+	SetLearningSettings(ctx context.Context, userID uuid.UUID, s *LearningSettings) error
 }
 
 // Codes is the verification-code behavior the Service depends on for code-based
@@ -223,6 +226,27 @@ func (s *Service) AddRole(ctx context.Context, userID uuid.UUID, role Role) (str
 
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 	return s.repo.GetByID(ctx, id)
+}
+
+// GetLearningSettings returns the learner's onboarding choices, or nil if they
+// have not finished onboarding. The handler maps nil to "onboarded": false.
+func (s *Service) GetLearningSettings(ctx context.Context, userID uuid.UUID) (*LearningSettings, error) {
+	return s.repo.GetLearningSettings(ctx, userID)
+}
+
+// SetLearningSettings validates and persists the learner's CEFR level and English
+// variant (both required, written together). It powers new-user onboarding and
+// later edits from the settings screen. Returns ErrInvalidLearningSettings for an
+// unknown level/variant and propagates ErrNoStudentProfile from the repository.
+func (s *Service) SetLearningSettings(ctx context.Context, userID uuid.UUID, level CEFRLevel, variant EnglishVariant) (*LearningSettings, error) {
+	if !level.Valid() || !variant.Valid() {
+		return nil, ErrInvalidLearningSettings
+	}
+	ls := &LearningSettings{CEFRLevel: level, EnglishVariant: variant}
+	if err := s.repo.SetLearningSettings(ctx, userID, ls); err != nil {
+		return nil, err
+	}
+	return ls, nil
 }
 
 // issue returns the user together with a fresh access + refresh token pair. The

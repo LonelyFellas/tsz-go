@@ -41,3 +41,50 @@ type User struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
+
+// CEFRLevel is a learner's self-assessed difficulty band, from the Common
+// European Framework of Reference (A1 easiest … C2 hardest). It scopes which
+// study content is served. Empty until the learner finishes onboarding.
+type CEFRLevel string
+
+const (
+	CEFRA1 CEFRLevel = "A1"
+	CEFRA2 CEFRLevel = "A2"
+	CEFRB1 CEFRLevel = "B1"
+	CEFRB2 CEFRLevel = "B2"
+	CEFRC1 CEFRLevel = "C1"
+	CEFRC2 CEFRLevel = "C2"
+)
+
+// Valid reports whether l is a known CEFR level.
+func (l CEFRLevel) Valid() bool {
+	switch l {
+	case CEFRA1, CEFRA2, CEFRB1, CEFRB2, CEFRC1, CEFRC2:
+		return true
+	}
+	return false
+}
+
+// EnglishVariant is the accent and spelling convention a learner studies in: all
+// audio and word spellings follow it. The choice is exclusive — British or
+// American. Empty until onboarding.
+type EnglishVariant string
+
+const (
+	VariantBritish  EnglishVariant = "BrE"
+	VariantAmerican EnglishVariant = "AmE"
+)
+
+// Valid reports whether v is a known English variant.
+func (v EnglishVariant) Valid() bool {
+	return v == VariantBritish || v == VariantAmerican
+}
+
+// LearningSettings holds the two basic choices a learner makes during onboarding.
+// They drive the whole study experience, so the frontend needs them on app load.
+// A nil *LearningSettings means onboarding is not complete (the app shows the
+// onboarding flow); the two fields are always set together, never one alone.
+type LearningSettings struct {
+	CEFRLevel      CEFRLevel      `json:"cefr_level"`
+	EnglishVariant EnglishVariant `json:"english_variant"`
+}

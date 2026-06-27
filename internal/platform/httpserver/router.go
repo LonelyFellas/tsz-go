@@ -80,6 +80,8 @@ func NewRouter(deps Deps) *gin.Engine {
 		authed.Use(AuthRequired(deps.TokenManager))
 		{
 			authed.GET("/me", deps.UserHandler.Me)
+			// Set the learner's CEFR level + English variant (onboarding & settings).
+			authed.PUT("/me/learning-settings", deps.UserHandler.UpdateLearningSettings)
 			// Revoke every refresh token the user holds (logout everywhere).
 			authed.POST("/auth/logout-all", deps.UserHandler.LogoutAll)
 			// Switch the active role to one the user already holds.
