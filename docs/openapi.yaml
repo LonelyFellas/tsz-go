@@ -246,6 +246,109 @@ paths:
                 $ref: "#/components/schemas/Error"
               example: { error: "invalid credentials" }
 
+  /api/v1/auth/password/forgot:
+    post:
+      tags: [Auth (public)]
+      summary: Request a password-reset code (SMS)
+      operationId: forgotPassword
+      description: |
+        Sends a one-time reset code by SMS to the phone (code lifetime 5 minutes,
+        `OTP_CODE_TTL`). Always returns 200 even for unknown phones, so it can't be
+        used to probe which accounts exist. Pair with `/auth/password/reset`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone:
+                  type: string
+                  description: The account's phone number.
+                  example: "13800138000"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: sent
+        "429":
+          description: |
+            Too Many Requests — per-target rate limit hit (resend cooldown
+            `OTP_RESEND_COOLDOWN`, or daily cap `OTP_DAILY_LIMIT`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "too many code requests, try again later" }
+
+  /api/v1/auth/password/reset:
+    post:
+      tags: [Auth (public)]
+      summary: Reset password with phone + code
+      operationId: resetPassword
+      description: |
+        Verifies the reset code sent by `/auth/password/forgot` and sets a new
+        password. On success every existing session is revoked server-side, so the
+        user must log in again with the new password. A wrong/expired code — or an
+        unknown phone — both return 400 with the same message, so the flow never
+        reveals which numbers are registered.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, code, new_password]
+              properties:
+                phone:
+                  type: string
+                  example: "13800138000"
+                code:
+                  type: string
+                  example: "123456"
+                new_password:
+                  type: string
+                  minLength: 8
+                  maxLength: 72
+                  description: bcrypt caps the input at 72 bytes.
+                  example: "newpassword456"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: reset
+        "400":
+          description: |
+            Bad Request — validation error, or an invalid/expired reset code
+            (also returned for an unknown phone, to avoid account probing).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "invalid or expired reset code" }
+        "403":
+          description: Forbidden — the account is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "account disabled" }
+
   /api/v1/auth/refresh:
     post:
       tags: [Auth (public)]

@@ -211,6 +211,65 @@ func (h *Handler) LoginCode(c *gin.Context) {
 	c.JSON(http.StatusOK, h.newAuthResponse(u, access, string(activeRole(u))))
 }
 
+type forgotPasswordRequest struct {
+	Phone string `json:"phone" binding:"required,min=5,max=20"`
+}
+
+// ForgotPassword sends a one-time reset code by SMS to the phone. Always 200
+// (even for unknown phones) so it can't be used to probe which accounts exist;
+// 429 only when the per-target OTP rate limit is hit.
+func (h *Handler) ForgotPassword(c *gin.Context) {
+	var req forgotPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.svc.RequestPasswordReset(c.Request.Context(), req.Phone); err != nil {
+		if errors.Is(err, otp.ErrRateLimited) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many code requests, try again later"})
+			return
+		}
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "sent"})
+}
+
+type resetPasswordRequest struct {
+	Phone       string `json:"phone" binding:"required,min=5,max=20"`
+	Code        string `json:"code" binding:"required"`
+	NewPassword string `json:"new_password" binding:"required,min=8,max=72"` // bcrypt caps at 72 bytes
+}
+
+// ResetPassword verifies the reset code and sets a new password. A bad/expired
+// code (or an unknown phone) → 400; a disabled account → 403. On success the
+// user's other sessions are already revoked server-side, so they must log in
+// again with the new password.
+func (h *Handler) ResetPassword(c *gin.Context) {
+	var req resetPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.svc.ResetPassword(c.Request.Context(), req.Phone, req.Code, req.NewPassword)
+	switch {
+	case errors.Is(err, ErrInvalidResetCode):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired reset code"})
+		return
+	case errors.Is(err, ErrAccountDisabled):
+		c.JSON(http.StatusForbidden, gin.H{"error": "account disabled"})
+		return
+	case err != nil:
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "reset"})
+}
+
 // Refresh exchanges the refresh-token cookie for a new access token and a rotated
 // refresh token (set back as a fresh cookie). A missing cookie or an
 // invalid/revoked/expired token → 401, and a stale cookie is cleared.

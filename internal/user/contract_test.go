@@ -207,6 +207,31 @@ func runStoreContract(t *testing.T, newStore func() Store) {
 		}
 	})
 
+	t.Run("set password overwrites the hash", func(t *testing.T) {
+		st := newStore()
+		u := mkUser()
+		if err := st.Create(ctx, u, RoleStudent); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := st.SetPassword(ctx, u.ID, "new-hash"); err != nil {
+			t.Fatalf("SetPassword: %v", err)
+		}
+		got, err := st.GetByID(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if got.PasswordHash != "new-hash" {
+			t.Errorf("password hash = %q, want %q", got.PasswordHash, "new-hash")
+		}
+	})
+
+	t.Run("set password on a missing user returns ErrNotFound", func(t *testing.T) {
+		st := newStore()
+		if err := st.SetPassword(ctx, uuid.New(), "x"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("SetPassword miss: err = %v, want ErrNotFound", err)
+		}
+	})
+
 	t.Run("learning settings require a student profile", func(t *testing.T) {
 		st := newStore()
 		u := mkUser()

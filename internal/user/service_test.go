@@ -388,6 +388,85 @@ func TestService_Refresh_Disabled(t *testing.T) {
 	}
 }
 
+func TestService_ResetPassword_Success(t *testing.T) {
+	svc, _, codes, _ := newTestService()
+	ctx := context.Background()
+	_, _, oldRefresh, _ := svc.Register(ctx, "13800138000", "rp@example.com", "password123", "RP", RoleStudent)
+
+	if err := svc.RequestPasswordReset(ctx, "13800138000"); err != nil {
+		t.Fatalf("request reset: %v", err)
+	}
+	code := codes.codes["13800138000"]
+	if code == "" {
+		t.Fatalf("reset code not recorded for target: %v", codes.codes)
+	}
+
+	if err := svc.ResetPassword(ctx, "13800138000", code, "newpassword456"); err != nil {
+		t.Fatalf("reset password: %v", err)
+	}
+
+	// every prior session is revoked: the pre-reset refresh token is dead.
+	if _, _, err := svc.Refresh(ctx, oldRefresh); !errors.Is(err, session.ErrInvalidRefreshToken) {
+		t.Errorf("post-reset refresh err = %v, want ErrInvalidRefreshToken", err)
+	}
+	// the old password no longer works...
+	if _, _, _, err := svc.LoginPassword(ctx, "13800138000", "password123"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("login with old password err = %v, want ErrInvalidCredentials", err)
+	}
+	// ...and the new one does.
+	if _, _, _, err := svc.LoginPassword(ctx, "13800138000", "newpassword456"); err != nil {
+		t.Errorf("login with new password: %v", err)
+	}
+	// the reset code is single-use: replaying it fails.
+	if err := svc.ResetPassword(ctx, "13800138000", code, "another123"); !errors.Is(err, ErrInvalidResetCode) {
+		t.Errorf("reused reset code err = %v, want ErrInvalidResetCode", err)
+	}
+}
+
+func TestService_ResetPassword_WrongCode(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	ctx := context.Background()
+	_, _, _, _ = svc.Register(ctx, "13800138000", "rpw@example.com", "password123", "RPW", RoleStudent)
+	_ = svc.RequestPasswordReset(ctx, "13800138000")
+
+	if err := svc.ResetPassword(ctx, "13800138000", "000000", "newpassword456"); !errors.Is(err, ErrInvalidResetCode) {
+		t.Fatalf("err = %v, want ErrInvalidResetCode", err)
+	}
+	// the password was not changed: the original still logs in.
+	if _, _, _, err := svc.LoginPassword(ctx, "13800138000", "password123"); err != nil {
+		t.Errorf("original password should still work: %v", err)
+	}
+}
+
+// A valid code for a phone with no account must stay generic (ErrInvalidResetCode),
+// never revealing that the number is unregistered.
+func TestService_ResetPassword_UnknownPhone(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	ctx := context.Background()
+
+	if err := svc.RequestPasswordReset(ctx, "19999999999"); err != nil {
+		t.Fatalf("request reset: %v", err)
+	}
+	if err := svc.ResetPassword(ctx, "19999999999", "123456", "newpassword456"); !errors.Is(err, ErrInvalidResetCode) {
+		t.Fatalf("err = %v, want ErrInvalidResetCode", err)
+	}
+}
+
+// A disabled account cannot reset its way back in: after the code checks out, the
+// disabled state surfaces (mirroring code login).
+func TestService_ResetPassword_Disabled(t *testing.T) {
+	svc, store, codes, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "rpd@example.com", "password123", "RPD", RoleStudent)
+	disable(t, store, reg.ID)
+
+	_ = svc.RequestPasswordReset(ctx, "13800138000")
+	code := codes.codes["13800138000"]
+	if err := svc.ResetPassword(ctx, "13800138000", code, "newpassword456"); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("err = %v, want ErrAccountDisabled", err)
+	}
+}
+
 func TestService_Logout_RevokesRefresh(t *testing.T) {
 	svc, _, _, _ := newTestService()
 	ctx := context.Background()

@@ -157,6 +157,17 @@ func (f *fakeStore) SetLearningSettings(_ context.Context, userID uuid.UUID, s *
 	return nil
 }
 
+func (f *fakeStore) SetPassword(_ context.Context, userID uuid.UUID, passwordHash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.byID[userID]
+	if !ok {
+		return ErrNotFound
+	}
+	u.PasswordHash = passwordHash
+	return nil
+}
+
 // fakeCodes is an in-memory Codes used to unit-test code-based login. RequestCode
 // records the "sent" code per target; Verify checks it and (on success) clears it.
 type fakeCodes struct {
