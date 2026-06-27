@@ -274,6 +274,20 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 	if !bytes.Contains(w.Body.Bytes(), []byte(reg.User.ID)) {
 		t.Errorf("me did not return the expected user: %s", w.Body)
 	}
+	// a freshly registered user has not completed onboarding
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"onboarded":false`)) {
+		t.Errorf("new user should report onboarded:false: %s", w.Body)
+	}
+
+	// complete onboarding: set CEFR level + English variant
+	if w := req(t, r, http.MethodPut, "/api/v1/me/learning-settings", `{"cefr_level":"B1","english_variant":"BrE"}`, login.AccessToken); w.Code != http.StatusOK {
+		t.Fatalf("update learning-settings status = %d, body=%s", w.Code, w.Body)
+	}
+	// me now reflects the completed onboarding and the chosen settings
+	w = req(t, r, http.MethodGet, "/api/v1/me", "", login.AccessToken)
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"onboarded":true`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"cefr_level":"B1"`)) {
+		t.Errorf("me should reflect completed onboarding: %s", w.Body)
+	}
 
 	// switching to a role the user does not yet hold → 403
 	if w := req(t, r, http.MethodPost, "/api/v1/auth/switch-role", `{"role":"teacher"}`, login.AccessToken); w.Code != http.StatusForbidden {

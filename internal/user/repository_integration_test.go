@@ -111,6 +111,60 @@ func TestRepository_CreateAndGet(t *testing.T) {
 	}
 }
 
+func TestRepository_LearningSettings(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+
+	// a fresh student has a profile but no settings yet → nil, not an error
+	student := &User{ID: uuid.New(), Phone: uniquePhone(), PasswordHash: "hash", DisplayName: "S"}
+	if err := repo.Create(ctx, student, RoleStudent); err != nil {
+		t.Fatalf("create student: %v", err)
+	}
+	got, err := repo.GetLearningSettings(ctx, student.ID)
+	if err != nil {
+		t.Fatalf("get (unset): %v", err)
+	}
+	if got != nil {
+		t.Errorf("settings = %v, want nil before onboarding", got)
+	}
+
+	// set, then read back
+	want := &LearningSettings{CEFRLevel: CEFRB2, EnglishVariant: VariantBritish}
+	if err := repo.SetLearningSettings(ctx, student.ID, want); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, err = repo.GetLearningSettings(ctx, student.ID)
+	if err != nil {
+		t.Fatalf("get (set): %v", err)
+	}
+	if got == nil || *got != *want {
+		t.Errorf("settings = %v, want %v", got, want)
+	}
+
+	// overwrite (settings screen / accent toggle)
+	next := &LearningSettings{CEFRLevel: CEFRC1, EnglishVariant: VariantAmerican}
+	if err := repo.SetLearningSettings(ctx, student.ID, next); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, _ = repo.GetLearningSettings(ctx, student.ID)
+	if got == nil || *got != *next {
+		t.Errorf("settings = %v, want %v", got, next)
+	}
+
+	// a teacher-only user has no student profile → ErrNoStudentProfile on write,
+	// nil on read
+	teacher := &User{ID: uuid.New(), Phone: uniquePhone(), PasswordHash: "hash", DisplayName: "T"}
+	if err := repo.Create(ctx, teacher, RoleTeacher); err != nil {
+		t.Fatalf("create teacher: %v", err)
+	}
+	if err := repo.SetLearningSettings(ctx, teacher.ID, want); !errors.Is(err, ErrNoStudentProfile) {
+		t.Errorf("set (teacher) err = %v, want ErrNoStudentProfile", err)
+	}
+	if got, err := repo.GetLearningSettings(ctx, teacher.ID); err != nil || got != nil {
+		t.Errorf("get (teacher) = %v, err = %v; want nil, nil", got, err)
+	}
+}
+
 func TestRepository_OptionalEmail(t *testing.T) {
 	repo := newTestRepo(t)
 	ctx := context.Background()

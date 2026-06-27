@@ -18,6 +18,7 @@ type fakeStore struct {
 	mu       sync.Mutex
 	byID     map[uuid.UUID]*User
 	roles    map[uuid.UUID]map[Role]bool
+	settings map[uuid.UUID]*LearningSettings
 	createFn func(*User, Role) error // optional overrides to force errors
 	getEmail func(string) (*User, error)
 	getPhone func(string) (*User, error)
@@ -26,8 +27,9 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		byID:  make(map[uuid.UUID]*User),
-		roles: make(map[uuid.UUID]map[Role]bool),
+		byID:     make(map[uuid.UUID]*User),
+		roles:    make(map[uuid.UUID]map[Role]bool),
+		settings: make(map[uuid.UUID]*LearningSettings),
 	}
 }
 
@@ -127,6 +129,29 @@ func (f *fakeStore) GetByID(_ context.Context, id uuid.UUID) (*User, error) {
 	}
 	cp := *u
 	return &cp, nil
+}
+
+func (f *fakeStore) GetLearningSettings(_ context.Context, userID uuid.UUID) (*LearningSettings, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if s := f.settings[userID]; s != nil {
+		cp := *s
+		return &cp, nil
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) SetLearningSettings(_ context.Context, userID uuid.UUID, s *LearningSettings) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Mirror the real repo: settings hang off the student profile, so a user who
+	// is not a student has nowhere to store them.
+	if !f.roles[userID][RoleStudent] {
+		return ErrNoStudentProfile
+	}
+	cp := *s
+	f.settings[userID] = &cp
+	return nil
 }
 
 // fakeCodes is an in-memory Codes used to unit-test code-based login. RequestCode

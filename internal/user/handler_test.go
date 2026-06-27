@@ -602,9 +602,17 @@ func TestHandler_Me(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", w.Code)
 		}
-		user := decode(t, w)["user"].(map[string]any)
+		body := decode(t, w)
+		user := body["user"].(map[string]any)
 		if user["email"] != "me@b.com" {
 			t.Errorf("email = %v", user["email"])
+		}
+		// A fresh user has not onboarded: learning_settings is null.
+		if body["onboarded"] != false {
+			t.Errorf("onboarded = %v, want false", body["onboarded"])
+		}
+		if body["learning_settings"] != nil {
+			t.Errorf("learning_settings = %v, want null", body["learning_settings"])
 		}
 	})
 
@@ -617,6 +625,75 @@ func TestHandler_Me(t *testing.T) {
 
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404", w.Code)
+		}
+	})
+}
+
+func TestHandler_UpdateLearningSettings(t *testing.T) {
+	h, _, _, _, tm := newTestHandler()
+
+	// userIDFromRegister registers a user with the given role and returns its ID.
+	userIDFromRegister := func(t *testing.T, body string) uuid.UUID {
+		t.Helper()
+		w := doJSON(t, h.Register, body)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("register status = %d", w.Code)
+		}
+		access, _ := decode(t, w)["access_token"].(string)
+		claims, err := tm.Parse(access)
+		if err != nil {
+			t.Fatalf("parse token: %v", err)
+		}
+		return claims.UserID
+	}
+
+	student := userIDFromRegister(t, `{"phone":"13800138000","email":"s@b.com","password":"password123","display_name":"S","role":"student"}`)
+
+	t.Run("200 sets settings and flips onboarded", func(t *testing.T) {
+		w := doJSONAuthed(t, h.UpdateLearningSettings, `{"cefr_level":"B1","english_variant":"BrE"}`, student)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		body := decode(t, w)
+		if body["onboarded"] != true {
+			t.Errorf("onboarded = %v, want true", body["onboarded"])
+		}
+		ls := body["learning_settings"].(map[string]any)
+		if ls["cefr_level"] != "B1" || ls["english_variant"] != "BrE" {
+			t.Errorf("learning_settings = %v", ls)
+		}
+
+		// Me now reflects the completed onboarding.
+		mw := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(mw)
+		c.Request = httptest.NewRequest(http.MethodGet, "/me", nil)
+		c.Set(auth.ContextUserIDKey, student)
+		h.Me(c)
+		mb := decode(t, mw)
+		if mb["onboarded"] != true {
+			t.Errorf("me onboarded = %v, want true", mb["onboarded"])
+		}
+	})
+
+	t.Run("400 invalid level", func(t *testing.T) {
+		w := doJSONAuthed(t, h.UpdateLearningSettings, `{"cefr_level":"Z9","english_variant":"BrE"}`, student)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("400 missing variant", func(t *testing.T) {
+		w := doJSONAuthed(t, h.UpdateLearningSettings, `{"cefr_level":"B1"}`, student)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("409 teacher-only user has no student profile", func(t *testing.T) {
+		teacher := userIDFromRegister(t, `{"phone":"13900139000","email":"t@b.com","password":"password123","display_name":"T","role":"teacher"}`)
+		w := doJSONAuthed(t, h.UpdateLearningSettings, `{"cefr_level":"B1","english_variant":"AmE"}`, teacher)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409", w.Code)
 		}
 	})
 }

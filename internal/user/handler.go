@@ -331,5 +331,53 @@ func (h *Handler) Me(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"user": u, "active_role": activeRole})
+	// learning_settings is null until the learner finishes onboarding; the app
+	// reads the derived "onboarded" flag rather than re-deriving it from null, so
+	// the rule for "new user" can change server-side without a client release.
+	settings, err := h.svc.GetLearningSettings(c.Request.Context(), userID)
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user":              u,
+		"active_role":       activeRole,
+		"learning_settings": settings,
+		"onboarded":         settings != nil,
+	})
+}
+
+type learningSettingsRequest struct {
+	CEFRLevel      string `json:"cefr_level" binding:"required,oneof=A1 A2 B1 B2 C1 C2"`
+	EnglishVariant string `json:"english_variant" binding:"required,oneof=BrE AmE"`
+}
+
+// UpdateLearningSettings sets the learner's CEFR level and English variant. It
+// backs both new-user onboarding and later edits from the settings screen. Both
+// fields are required, so the two basic settings are always written together — an
+// all-or-nothing write that keeps "onboarded" unambiguous.
+func (h *Handler) UpdateLearningSettings(c *gin.Context) {
+	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
+
+	var req learningSettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	settings, err := h.svc.SetLearningSettings(c.Request.Context(), userID, CEFRLevel(req.CEFRLevel), EnglishVariant(req.EnglishVariant))
+	switch {
+	case errors.Is(err, ErrNoStudentProfile):
+		c.JSON(http.StatusConflict, gin.H{"error": "learning settings require a student profile"})
+		return
+	case errors.Is(err, ErrInvalidLearningSettings):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid learning settings"})
+		return
+	case err != nil:
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"learning_settings": settings, "onboarded": true})
 }

@@ -193,6 +193,19 @@ Returned by register / login / login-with-code:
 
 > The refresh token is **not** in the body — it is set as an HttpOnly cookie via the `Set-Cookie` response header (see [Authentication](#authentication)).
 
+### Learning settings
+
+A learner's two basic onboarding choices. They drive the whole study experience (which content is served, and the accent + spelling used), so the frontend needs them on app load.
+
+```json
+{
+  "cefr_level": "B1",        // A1 | A2 | B1 | B2 | C1 | C2
+  "english_variant": "BrE"   // BrE (British) | AmE (American)
+}
+```
+
+The two fields are always set **together** — there is no half-set state. Until onboarding is done, `learning_settings` is `null` and `onboarded` is `false` (see [`GET /api/v1/me`](#get-apiv1me)). Read the server-derived `onboarded` flag rather than re-deriving it from `learning_settings == null`, so the rule for "new user" can change server-side without a frontend release.
+
 ---
 
 ## Endpoints
@@ -332,16 +345,41 @@ Missing/malformed header → **401** `missing or malformed authorization header`
 Invalid/expired token → **401** `invalid or expired token`.
 
 #### `GET /api/v1/me`
-Current user + the role the token is acting as.
+Current user, the role the token is acting as, and the learner's onboarding state.
 
 **200**
 ```json
 {
   "user": { /* User */ },
-  "active_role": "student"
+  "active_role": "student",
+  "learning_settings": { "cefr_level": "B1", "english_variant": "BrE" },
+  "onboarded": true
 }
 ```
+`learning_settings` is `null` and `onboarded` is `false` until the learner completes onboarding (see [Learning settings](#learning-settings)). Show the onboarding flow when `onboarded` is `false`.
+
 **404** `user not found`
+
+---
+
+#### `PUT /api/v1/me/learning-settings`
+Set the learner's CEFR level + English variant. Backs both **new-user onboarding** and later edits from the settings screen (e.g. the BrE/AmE toggle). Both fields are required and written together.
+
+**Body**
+| Field | Type | Rules |
+|---|---|---|
+| `cefr_level` | string | required, one of `A1` `A2` `B1` `B2` `C1` `C2`. |
+| `english_variant` | string | required, `BrE` or `AmE`. |
+
+**200**
+```json
+{
+  "learning_settings": { "cefr_level": "B1", "english_variant": "BrE" },
+  "onboarded": true
+}
+```
+**400** validation error
+**409** `learning settings require a student profile` — the account has no student profile to attach them to (e.g. teacher-only).
 
 ---
 
@@ -394,7 +432,8 @@ All requests must be made with credentials enabled (`withCredentials: true` / `c
 
 **New user**
 1. `POST /auth/register` → keep `access_token` in memory (refresh cookie is set automatically).
-2. Call protected endpoints with `Authorization: Bearer <access_token>`.
+2. `GET /me` → if `onboarded` is `false`, run onboarding: have the user pick a CEFR level + English variant, then `PUT /me/learning-settings`.
+3. Call protected endpoints with `Authorization: Bearer <access_token>`.
 
 **Returning user (password)**
 1. `POST /auth/login` → keep the `access_token` in memory.

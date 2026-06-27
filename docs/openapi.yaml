@@ -283,6 +283,40 @@ paths:
                 $ref: "#/components/schemas/Error"
               example: { error: "user not found" }
 
+  /api/v1/me/learning-settings:
+    put:
+      tags: [User]
+      summary: Set the learner's CEFR level + English variant
+      operationId: updateLearningSettings
+      description: |
+        Sets the two basic learning settings. Backs both new-user onboarding and
+        later edits from the settings screen. Both fields are required and written
+        together, so "onboarded" is never half-set.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LearningSettingsRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LearningSettingsResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          description: Conflict — the user has no student profile to attach settings to.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "learning settings require a student profile" }
+
   /api/v1/auth/logout-all:
     post:
       tags: [Auth (authenticated)]
@@ -418,6 +452,36 @@ components:
       type: string
       enum: [student, teacher]
 
+    CEFRLevel:
+      type: string
+      enum: [A1, A2, B1, B2, C1, C2]
+      description: Learner difficulty band (CEFR), A1 easiest … C2 hardest.
+
+    EnglishVariant:
+      type: string
+      enum: [BrE, AmE]
+      description: Accent and spelling convention — British or American.
+
+    LearningSettings:
+      type: object
+      description: A learner's two onboarding choices; both are always set together.
+      properties:
+        cefr_level:
+          $ref: "#/components/schemas/CEFRLevel"
+        english_variant:
+          $ref: "#/components/schemas/EnglishVariant"
+      required: [cefr_level, english_variant]
+
+    LearningSettingsRequest:
+      type: object
+      description: Both fields required — the two basic settings are written together.
+      required: [cefr_level, english_variant]
+      properties:
+        cefr_level:
+          $ref: "#/components/schemas/CEFRLevel"
+        english_variant:
+          $ref: "#/components/schemas/EnglishVariant"
+
     User:
       type: object
       properties:
@@ -533,6 +597,18 @@ components:
           example: 1719400000
       required: [access_token, expires_in, refresh_token_expires_at]
 
+    LearningSettingsResponse:
+      type: object
+      description: Returned by update-learning-settings.
+      properties:
+        learning_settings:
+          $ref: "#/components/schemas/LearningSettings"
+        onboarded:
+          type: boolean
+          description: Always true here — settings were just written.
+          example: true
+      required: [learning_settings, onboarded]
+
     RoleTokenResponse:
       type: object
       description: Returned by switch-role / add-role.
@@ -551,7 +627,16 @@ components:
           $ref: "#/components/schemas/User"
         active_role:
           $ref: "#/components/schemas/Role"
-      required: [user, active_role]
+        learning_settings:
+          type: object
+          description: Null until the learner finishes onboarding.
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/LearningSettings"
+        onboarded:
+          type: boolean
+          description: Server-derived — true once learning_settings is set. Clients read this rather than re-deriving from null.
+      required: [user, active_role, onboarded]
 
 security:
   - bearerAuth: []

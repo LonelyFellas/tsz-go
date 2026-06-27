@@ -17,6 +17,9 @@ var (
 	ErrEmailTaken = errors.New("email already registered")
 	ErrPhoneTaken = errors.New("phone already registered")
 	ErrRoleTaken  = errors.New("user already has this role")
+	// ErrNoStudentProfile means learning settings were written for a user who has
+	// no student profile to attach them to (e.g. a teacher-only account).
+	ErrNoStudentProfile = errors.New("no student profile")
 )
 
 // Repository is the data-access boundary for users. SQL is hand-written here;
@@ -209,6 +212,45 @@ func (r *Repository) loadRoles(ctx context.Context, userID uuid.UUID) ([]Role, e
 		return nil, fmt.Errorf("iterate roles: %w", err)
 	}
 	return roles, nil
+}
+
+// GetLearningSettings returns the learner's onboarding choices, or nil if they
+// have no student profile or have not finished onboarding (either column NULL).
+// nil is a normal "not onboarded yet" result, not an error.
+func (r *Repository) GetLearningSettings(ctx context.Context, userID uuid.UUID) (*LearningSettings, error) {
+	var level, variant *string // both NULL until onboarding completes
+	err := r.db.QueryRow(ctx,
+		`SELECT cefr_level, english_variant FROM student_profiles WHERE user_id = $1`,
+		userID).Scan(&level, &variant)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil // not a student → no learning settings
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query learning settings: %w", err)
+	}
+	if level == nil || variant == nil {
+		return nil, nil // onboarding not finished
+	}
+	return &LearningSettings{CEFRLevel: CEFRLevel(*level), EnglishVariant: EnglishVariant(*variant)}, nil
+}
+
+// SetLearningSettings writes the learner's onboarding choices onto their student
+// profile, overwriting any previous values. Returns ErrNoStudentProfile if the
+// user has no student profile row (so the caller can 409 rather than silently
+// no-op). Both fields are set together; the caller validates them first.
+func (r *Repository) SetLearningSettings(ctx context.Context, userID uuid.UUID, s *LearningSettings) error {
+	ct, err := r.db.Exec(ctx,
+		`UPDATE student_profiles
+		    SET cefr_level = $2, english_variant = $3, updated_at = now()
+		  WHERE user_id = $1`,
+		userID, s.CEFRLevel, s.EnglishVariant)
+	if err != nil {
+		return fmt.Errorf("update learning settings: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNoStudentProfile
+	}
+	return nil
 }
 
 // nullable maps an empty string to a SQL NULL so optional columns (email) are
