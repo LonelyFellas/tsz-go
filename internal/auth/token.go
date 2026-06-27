@@ -18,6 +18,13 @@ const (
 	ContextRoleKey   = "auth.role"
 )
 
+// RoleAdmin is the active-role value that the admin gate checks for. It is
+// duplicated here (as a plain string) so the httpserver middleware can gate on it
+// without importing the user package — which would create an import cycle, since
+// user depends on auth. The user package owns the canonical user.RoleAdmin; this
+// constant must stay in sync with it.
+const RoleAdmin = "admin"
+
 // Claims is what a parsed token decodes to: who the user is, and which role
 // they are currently acting as ("active role"). A user may hold several roles;
 // switching role re-issues a token with a different Role.

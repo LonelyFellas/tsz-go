@@ -121,3 +121,17 @@ func AuthRequired(tm *auth.TokenManager) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// RequireRole gates a route on the token's active role, aborting with 403 unless
+// it matches. Mount it AFTER AuthRequired (which populates the role in context);
+// on its own it has no token to read. The role comparison is against the active
+// role only — a multi-role account must switch into the role first.
+func RequireRole(role string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if got, _ := c.Get(auth.ContextRoleKey); got != role {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "admin role required"})
+			return
+		}
+		c.Next()
+	}
+}

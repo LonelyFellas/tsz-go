@@ -103,6 +103,69 @@ func TestAuthRequired_ContextRole(t *testing.T) {
 	}
 }
 
+// RequireRole gates on the active role from the token: 403 unless it matches,
+// pass-through (200) when it does, and 403 when AuthRequired never ran (no role
+// in context). Mounted after AuthRequired in production.
+func TestRequireRole(t *testing.T) {
+	tm := auth.NewTokenManager("secret", time.Hour)
+	adminToken, _ := tm.Generate(uuid.New(), auth.RoleAdmin)
+	studentToken, _ := tm.Generate(uuid.New(), "student")
+
+	tests := []struct {
+		name       string
+		header     string
+		wantStatus int
+	}{
+		{"admin passes", "Bearer " + adminToken, http.StatusOK},
+		{"non-admin forbidden", "Bearer " + studentToken, http.StatusForbidden},
+		{"missing token unauthorized", "", http.StatusUnauthorized},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, engine := gin.CreateTestContext(w)
+
+			var reached bool
+			engine.Use(AuthRequired(tm), RequireRole(auth.RoleAdmin))
+			engine.GET("/admin/x", func(c *gin.Context) {
+				reached = true
+				c.Status(http.StatusOK)
+			})
+
+			c.Request = httptest.NewRequest(http.MethodGet, "/admin/x", nil)
+			if tt.header != "" {
+				c.Request.Header.Set("Authorization", tt.header)
+			}
+			engine.ServeHTTP(w, c.Request)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+			if reached != (tt.wantStatus == http.StatusOK) {
+				t.Errorf("handler reached = %v, want %v", reached, tt.wantStatus == http.StatusOK)
+			}
+		})
+	}
+}
+
+// RequireRole on its own (no AuthRequired upstream, so no role in context) must
+// abort with 403 rather than pass through.
+func TestRequireRole_NoRoleInContext(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, engine := gin.CreateTestContext(w)
+
+	engine.Use(RequireRole(auth.RoleAdmin))
+	engine.GET("/admin/x", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	c.Request = httptest.NewRequest(http.MethodGet, "/admin/x", nil)
+	engine.ServeHTTP(w, c.Request)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+}
+
 func TestRequestLogger(t *testing.T) {
 	// capture slog output as JSON so we can assert on the emitted fields
 	var buf bytes.Buffer

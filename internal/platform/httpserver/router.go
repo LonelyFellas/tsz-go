@@ -89,6 +89,15 @@ func NewRouter(deps Deps) *gin.Engine {
 			// Acquire an additional identity (e.g. a student who also teaches).
 			authed.POST("/auth/roles", deps.UserHandler.AddRole)
 		}
+
+		// Back-office routes, gated on the admin active role. AuthRequired runs
+		// first (401 for a missing/invalid token), then RequireRole (403 unless the
+		// token is acting as admin). Phase A exposes only the profile probe.
+		admin := v1.Group("/admin")
+		admin.Use(AuthRequired(deps.TokenManager), RequireRole(auth.RoleAdmin))
+		{
+			admin.GET("/profile", deps.UserHandler.AdminProfile)
+		}
 	}
 
 	return r

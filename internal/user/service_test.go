@@ -130,7 +130,10 @@ func TestService_Register_BcryptError(t *testing.T) {
 
 func TestService_Register_InvalidRole(t *testing.T) {
 	svc, _, _, _ := newTestService()
-	if _, _, _, err := svc.Register(context.Background(), "13800138000", "r@example.com", "password123", "R", Role("admin")); !errors.Is(err, ErrInvalidRole) {
+	// An unknown role is rejected by the service. (Admin is now a *valid* Role, so
+	// it no longer fails here — admin self-registration is instead blocked at the
+	// handler's binding tag; see TestHandler_Register "invalid role".)
+	if _, _, _, err := svc.Register(context.Background(), "13800138000", "r@example.com", "password123", "R", Role("superuser")); !errors.Is(err, ErrInvalidRole) {
 		t.Fatalf("err = %v, want ErrInvalidRole", err)
 	}
 }
@@ -326,6 +329,130 @@ func TestService_Refresh_PreservesActiveRole(t *testing.T) {
 	}
 }
 
+// disable flips a user's stored status to disabled, simulating a back-office
+// disable so the login/refresh rejection paths can be exercised.
+func disable(t *testing.T, store *fakeStore, id uuid.UUID) {
+	t.Helper()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	u, ok := store.byID[id]
+	if !ok {
+		t.Fatalf("user %s not in store", id)
+	}
+	u.Status = StatusDisabled
+}
+
+func TestService_LoginPassword_Disabled(t *testing.T) {
+	svc, store, _, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "d@example.com", "password123", "D", RoleStudent)
+	disable(t, store, reg.ID)
+
+	// correct password, but the account is disabled → ErrAccountDisabled, not a
+	// successful login and not the generic credentials error.
+	if _, _, _, err := svc.LoginPassword(ctx, "13800138000", "password123"); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("err = %v, want ErrAccountDisabled", err)
+	}
+	// a wrong password on a disabled account still returns the generic error,
+	// never revealing the disabled state.
+	if _, _, _, err := svc.LoginPassword(ctx, "13800138000", "wrong-password"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("wrong-password err = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+func TestService_LoginCode_Disabled(t *testing.T) {
+	svc, store, codes, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "dc@example.com", "password123", "DC", RoleStudent)
+	disable(t, store, reg.ID)
+
+	if err := svc.RequestLoginCode(ctx, "13800138000"); err != nil {
+		t.Fatalf("request code: %v", err)
+	}
+	code := codes.codes["13800138000"]
+	if _, _, _, err := svc.LoginCode(ctx, "13800138000", code); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("err = %v, want ErrAccountDisabled", err)
+	}
+}
+
+// A disabled account cannot refresh even with a previously valid refresh token:
+// the disable takes effect within one access-token TTL.
+func TestService_Refresh_Disabled(t *testing.T) {
+	svc, store, _, _ := newTestService()
+	ctx := context.Background()
+	reg, _, refresh, _ := svc.Register(ctx, "13800138000", "rd@example.com", "password123", "RD", RoleStudent)
+	disable(t, store, reg.ID)
+
+	if _, _, err := svc.Refresh(ctx, refresh); !errors.Is(err, session.ErrInvalidRefreshToken) {
+		t.Fatalf("err = %v, want ErrInvalidRefreshToken", err)
+	}
+}
+
+// SeedAdmin is idempotent: creating a fresh admin, then re-running with the same
+// phone, leaves exactly one account that holds the admin role.
+func TestService_SeedAdmin_Idempotent(t *testing.T) {
+	svc, store, _, _ := newTestService()
+	ctx := context.Background()
+
+	first, err := svc.SeedAdmin(ctx, " 13800138000 ", "adminpass123", "Administrator")
+	if err != nil {
+		t.Fatalf("first seed: %v", err)
+	}
+	if first.Phone != "13800138000" {
+		t.Errorf("phone = %q, want trimmed", first.Phone)
+	}
+	if !hasRole(first.Roles, RoleAdmin) {
+		t.Errorf("roles = %v, want to include admin", first.Roles)
+	}
+
+	second, err := svc.SeedAdmin(ctx, "13800138000", "adminpass123", "Administrator")
+	if err != nil {
+		t.Fatalf("second seed: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Errorf("second seed created a new account: %s != %s", second.ID, first.ID)
+	}
+	if len(store.byID) != 1 {
+		t.Errorf("account count = %d, want 1", len(store.byID))
+	}
+}
+
+// SeedAdmin on an existing non-admin account grants the admin role rather than
+// creating a duplicate, and leaves the original password intact.
+func TestService_SeedAdmin_PromotesExisting(t *testing.T) {
+	svc, store, _, _ := newTestService()
+	ctx := context.Background()
+
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "p@example.com", "password123", "P", RoleStudent)
+
+	promoted, err := svc.SeedAdmin(ctx, "13800138000", "ignored-password", "Administrator")
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if promoted.ID != reg.ID {
+		t.Errorf("seed created a new account instead of promoting: %s != %s", promoted.ID, reg.ID)
+	}
+	if !hasRole(promoted.Roles, RoleAdmin) || !hasRole(promoted.Roles, RoleStudent) {
+		t.Errorf("roles = %v, want both student and admin", promoted.Roles)
+	}
+	if len(store.byID) != 1 {
+		t.Errorf("account count = %d, want 1", len(store.byID))
+	}
+	// the existing password is untouched — the seed password is only used on create.
+	if err := bcrypt.CompareHashAndPassword([]byte(store.byID[reg.ID].PasswordHash), []byte("password123")); err != nil {
+		t.Errorf("existing password was overwritten by seed: %v", err)
+	}
+}
+
+func hasRole(roles []Role, want Role) bool {
+	for _, r := range roles {
+		if r == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestService_Logout_RevokesRefresh(t *testing.T) {
 	svc, _, _, _ := newTestService()
 	ctx := context.Background()
@@ -416,7 +543,7 @@ func TestRole_Valid(t *testing.T) {
 	cases := map[Role]bool{
 		RoleStudent:     true,
 		RoleTeacher:     true,
-		Role("admin"):   false,
+		RoleAdmin:       true, // admin is a valid role (the admin gate checks it)
 		Role(""):        false,
 		Role("Student"): false, // case-sensitive
 	}

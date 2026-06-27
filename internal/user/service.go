@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/darwish/tsz-go/internal/auth"
+	"github.com/darwish/tsz-go/internal/session"
 )
 
 var (
@@ -17,6 +18,10 @@ var (
 	ErrInvalidRole             = errors.New("invalid role")
 	ErrRoleNotOwned            = errors.New("user does not have this role")
 	ErrInvalidLearningSettings = errors.New("invalid learning settings")
+	// ErrAccountDisabled is returned when a disabled account tries to log in or
+	// refresh. It is distinct from ErrInvalidCredentials (the credentials are
+	// valid; the account is locked) so the handler can surface a 403.
+	ErrAccountDisabled = errors.New("account disabled")
 )
 
 // codePurposeLogin is the verification-code purpose for code-based login.
@@ -27,11 +32,13 @@ const codePurposeLogin = "login"
 // concrete *Repository satisfies it in production.
 type Store interface {
 	Create(ctx context.Context, u *User, role Role) error
+	CreateAdmin(ctx context.Context, u *User) error
 	GetByEmail(ctx context.Context, email string) (*User, error)
 	GetByPhone(ctx context.Context, phone string) (*User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*User, error)
 	HasRole(ctx context.Context, userID uuid.UUID, role Role) (bool, error)
 	AddRole(ctx context.Context, userID uuid.UUID, role Role) error
+	AddAdminRole(ctx context.Context, userID uuid.UUID) error
 	SetActiveRole(ctx context.Context, userID uuid.UUID, role Role) error
 	GetLearningSettings(ctx context.Context, userID uuid.UUID) (*LearningSettings, error)
 	SetLearningSettings(ctx context.Context, userID uuid.UUID, s *LearningSettings) error
@@ -112,6 +119,13 @@ func (s *Service) LoginPassword(ctx context.Context, identifier, password string
 		return nil, "", "", ErrInvalidCredentials
 	}
 
+	// Credentials check out, but a disabled account may not log in. Checked after
+	// the password compare so a wrong password still returns the generic
+	// credentials error and never reveals an account's disabled state.
+	if u.Status == StatusDisabled {
+		return nil, "", "", ErrAccountDisabled
+	}
+
 	return s.issue(ctx, u)
 }
 
@@ -136,6 +150,11 @@ func (s *Service) LoginCode(ctx context.Context, identifier, code string) (*User
 		return nil, "", "", ErrInvalidCredentials
 	}
 
+	// A valid code still can't unlock a disabled account.
+	if u.Status == StatusDisabled {
+		return nil, "", "", ErrAccountDisabled
+	}
+
 	return s.issue(ctx, u)
 }
 
@@ -154,6 +173,12 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (accessTo
 	u, err := s.repo.GetByID(ctx, userID)
 	if err != nil {
 		return "", "", err
+	}
+	// A disabled account cannot refresh: surface the same invalid-refresh-token
+	// error so the handler clears the cookie and returns 401. This makes a disable
+	// effective within one access-token TTL even for already-issued refresh tokens.
+	if u.Status == StatusDisabled {
+		return "", "", session.ErrInvalidRefreshToken
 	}
 	access, err := s.token.Generate(userID, string(activeRole(u)))
 	if err != nil {
@@ -222,6 +247,55 @@ func (s *Service) AddRole(ctx context.Context, userID uuid.UUID, role Role) (str
 		return "", fmt.Errorf("generate token: %w", err)
 	}
 	return tok, nil
+}
+
+// SeedAdmin ensures an admin account exists for the given phone, idempotently. It
+// is the out-of-band bootstrap for the first back-office user (see cmd/seed) —
+// admin is never self-registered. Behavior:
+//
+//   - phone unknown → create the account with the admin role.
+//   - phone known, lacks admin → grant the admin role (password/display name of an
+//     existing account are left untouched).
+//   - phone known, already admin → no-op.
+//
+// Re-running is safe: it never duplicates an account and never errors on "already
+// an admin". The returned user reflects the resulting account.
+func (s *Service) SeedAdmin(ctx context.Context, phone, password, displayName string) (*User, error) {
+	phone = normalizePhone(phone)
+
+	existing, err := s.repo.GetByPhone(ctx, phone)
+	switch {
+	case err == nil:
+		// Account exists; grant admin if it is missing, otherwise nothing to do.
+		has, err := s.repo.HasRole(ctx, existing.ID, RoleAdmin)
+		if err != nil {
+			return nil, err
+		}
+		if !has {
+			if err := s.repo.AddAdminRole(ctx, existing.ID); err != nil {
+				return nil, err
+			}
+		}
+		return s.repo.GetByID(ctx, existing.ID)
+	case errors.Is(err, ErrNotFound):
+		// No such account; create it fresh with the admin role.
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, fmt.Errorf("hash password: %w", err)
+		}
+		u := &User{
+			ID:           uuid.New(),
+			Phone:        phone,
+			PasswordHash: string(hash),
+			DisplayName:  strings.TrimSpace(displayName),
+		}
+		if err := s.repo.CreateAdmin(ctx, u); err != nil {
+			return nil, err
+		}
+		return u, nil
+	default:
+		return nil, err
+	}
 }
 
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {

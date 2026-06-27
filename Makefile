@@ -9,7 +9,7 @@ DEV_JWT_TTL      ?= 24h
 
 AIR ?= $(shell go env GOPATH)/bin/air
 
-.PHONY: dev run build test tidy fmt vet up down logs migrate migrate-create
+.PHONY: dev run build test tidy fmt vet up down logs migrate migrate-create seed
 
 dev: ## Dev loop: Postgres in Docker + air live-reload (rebuilds on save, no Ctrl+C)
 	-docker compose stop app 2>/dev/null
@@ -28,6 +28,9 @@ build: ## Compile the server binary into ./bin
 
 migrate: ## Apply all pending migrations as a standalone step (needs DATABASE_URL)
 	$(GO) run ./cmd/migrate
+
+seed: ## Bootstrap the first admin, idempotently (needs DATABASE_URL + SEED_ADMIN_*)
+	$(GO) run ./cmd/seed
 
 test: ## Run unit tests (no DB required)
 	$(GO) test -cover ./...

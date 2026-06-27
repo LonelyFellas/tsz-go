@@ -144,6 +144,9 @@ func (h *Handler) Login(c *gin.Context) {
 	case errors.Is(err, ErrInvalidCredentials):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
+	case errors.Is(err, ErrAccountDisabled):
+		c.JSON(http.StatusForbidden, gin.H{"error": "account disabled"})
+		return
 	case err != nil:
 		internalError(c, err)
 		return
@@ -195,6 +198,9 @@ func (h *Handler) LoginCode(c *gin.Context) {
 	switch {
 	case errors.Is(err, ErrInvalidCredentials):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	case errors.Is(err, ErrAccountDisabled):
+		c.JSON(http.StatusForbidden, gin.H{"error": "account disabled"})
 		return
 	case err != nil:
 		internalError(c, err)
@@ -345,6 +351,45 @@ func (h *Handler) Me(c *gin.Context) {
 		"active_role":       activeRole,
 		"learning_settings": settings,
 		"onboarded":         settings != nil,
+	})
+}
+
+// adminProfileResponse is the AdminProfile contract (see openapi.yaml): the
+// signed-in admin's own identity, used by the console to confirm the role gate
+// and render a "signed in as …" header.
+type adminProfileResponse struct {
+	ID          uuid.UUID `json:"id"`
+	Phone       string    `json:"phone"`
+	DisplayName string    `json:"display_name"`
+	Roles       []Role    `json:"roles"`
+	ActiveRole  string    `json:"active_role"`
+}
+
+// AdminProfile returns the signed-in admin's identity. It is the Phase A probe
+// behind the admin gate: the 401/403 cases are handled upstream by AuthRequired +
+// RequireRole, so this handler only ever sees an authenticated admin and just
+// needs to load and shape the identity (200, or 404 if the account vanished).
+func (h *Handler) AdminProfile(c *gin.Context) {
+	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
+	activeRole, _ := c.Get(auth.ContextRoleKey)
+
+	u, err := h.svc.GetByID(c.Request.Context(), userID)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	case err != nil:
+		internalError(c, err)
+		return
+	}
+
+	role, _ := activeRole.(string)
+	c.JSON(http.StatusOK, adminProfileResponse{
+		ID:          u.ID,
+		Phone:       u.Phone,
+		DisplayName: u.DisplayName,
+		Roles:       u.Roles,
+		ActiveRole:  role,
 	})
 }
 

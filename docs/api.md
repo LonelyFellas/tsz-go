@@ -426,6 +426,44 @@ Acquire an additional identity (e.g. a student who also starts teaching), then s
 
 ---
 
+### Admin (back office)
+
+The `/api/v1/admin/*` endpoints back the management console (dashboard, user
+administration, moderation, Tiansheng-coin, audit). They share the same
+authentication as the rest of the API **plus a role gate**:
+
+- The access token must be **acting as the `admin` role** (it travels in the
+  token, so a multi-role account switches in via `/auth/switch-role` first).
+- Missing/expired token → **401**, same as any authenticated endpoint.
+- Authenticated but not admin → **403** `admin role required`.
+
+```
+Authorization: Bearer <access_token acting as admin>
+```
+
+Beyond auth, these endpoints differ from the teacher-facing API in two ways:
+
+- **No class scoping** — admin sees all users, classes, and content (the
+  teacher views are filtered to the teacher's own classes).
+- **Contact fields are visible** — phone/email are returned in the admin user
+  directory; the teacher API masks them.
+
+Conventions used across the admin list endpoints:
+
+- **Pagination** — `?page=1&page_size=20` (max `page_size` 100); responses wrap
+  rows as `{ "items": [...], "page": { "page", "page_size", "total" } }`.
+- **Sensitive writes are audited** — coin grant/deduct, review approve/reject,
+  and user changes each append an entry queryable via `GET /api/v1/admin/audit-logs`.
+- **Coin is ledger-backed** — grant/deduct take an `idempotency_key` (a retry is
+  a no-op), balances are derived, and a deduct that would go negative returns
+  **409** `insufficient balance`.
+
+The full endpoint list, request/response schemas, and error cases live in the
+OpenAPI spec ([openapi.yaml](openapi.yaml), tags `Admin (…)`) and the design
+rationale in [architecture.md](architecture.md) §9.
+
+---
+
 ## Typical flows
 
 All requests must be made with credentials enabled (`withCredentials: true` / `credentials: 'include'`) so the refresh cookie flows.

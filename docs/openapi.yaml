@@ -38,6 +38,21 @@ tags:
     description: Auth operations that require a valid access token (role and session management).
   - name: User
     description: The authenticated user's own profile.
+  - name: Admin (dashboard)
+    description: Back-office home metrics. Requires the admin role.
+  - name: Admin (users)
+    description: Back-office user administration (teachers and students). Requires the admin role.
+  - name: Admin (review)
+    description: |
+      Moderation queue — word lists, teacher applications, comments. One API
+      surface over per-entity status fields (see docs/architecture.md §9.2).
+      Requires the admin role.
+  - name: Admin (coin)
+    description: |
+      Tiansheng-coin administration — grant, deduct, leaderboard, per-account
+      ledger. Backed by an append-only ledger (see §9.3). Requires the admin role.
+  - name: Admin (audit)
+    description: Read-only audit trail of sensitive back-office actions (§9.4). Requires the admin role.
 
 paths:
   /healthz:
@@ -395,6 +410,323 @@ paths:
                 $ref: "#/components/schemas/Error"
               example: { error: "user already has this role" }
 
+  # ── Admin (back office) ──────────────────────────────────────────────
+  # All /api/v1/admin/* endpoints require an access token whose active role is
+  # admin; the admin middleware returns 403 otherwise. Design-only here — no
+  # handlers are generated for these (apigen is scoped to getCurrentUser).
+
+  /api/v1/admin/stats/overview:
+    get:
+      tags: [Admin (dashboard)]
+      summary: Back-office home metrics
+      operationId: adminStatsOverview
+      description: |
+        Aggregated counts for the dashboard cards (users, tasks, smart vocab,
+        coin). At current scale these are direct COUNT(*) + time-window queries.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardOverview"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+  /api/v1/admin/profile:
+    get:
+      tags: [Admin (users)]
+      summary: Current admin's own identity
+      operationId: adminProfile
+      description: |
+        Phase A probe behind the admin gate. Lets the console confirm the role
+        gate (200 for admin, 403 otherwise) and render a "signed in as …" header.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminProfile"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+  /api/v1/admin/users:
+    get:
+      tags: [Admin (users)]
+      summary: List users (teachers / students)
+      operationId: adminListUsers
+      description: Back-office user directory. Unlike the teacher view, contact fields are visible.
+      parameters:
+        - name: role
+          in: query
+          description: Filter by held role.
+          schema:
+            type: string
+            enum: [student, teacher, admin]
+        - name: q
+          in: query
+          description: Free-text match on phone / email / display name.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserListResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+  /api/v1/admin/reviews:
+    get:
+      tags: [Admin (review)]
+      summary: List items awaiting (or past) review
+      operationId: adminListReviews
+      parameters:
+        - name: type
+          in: query
+          required: true
+          description: Which moderation queue.
+          schema:
+            $ref: "#/components/schemas/ReviewType"
+        - name: status
+          in: query
+          description: Defaults to pending.
+          schema:
+            $ref: "#/components/schemas/ReviewStatus"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewListResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+  /api/v1/admin/reviews/{reviewId}/approve:
+    post:
+      tags: [Admin (review)]
+      summary: Approve a review item
+      operationId: adminApproveReview
+      description: Transitions the target to approved and writes an audit entry. Idempotent.
+      parameters:
+        - $ref: "#/components/parameters/ReviewId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewItem"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+  /api/v1/admin/reviews/{reviewId}/reject:
+    post:
+      tags: [Admin (review)]
+      summary: Reject a review item
+      operationId: adminRejectReview
+      description: Transitions the target to rejected with a reason and writes an audit entry.
+      parameters:
+        - $ref: "#/components/parameters/ReviewId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewItem"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+  /api/v1/admin/coin/grant:
+    post:
+      tags: [Admin (coin)]
+      summary: Grant coin to a user
+      operationId: adminGrantCoin
+      description: |
+        Appends a positive ledger entry inside a transaction. `idempotency_key`
+        makes a retried grant a no-op (returns the original entry).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CoinAdjustRequest"
+      responses:
+        "200":
+          description: OK — also returned when the idempotency key replays a prior grant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoinTxnResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+  /api/v1/admin/coin/deduct:
+    post:
+      tags: [Admin (coin)]
+      summary: Deduct coin from a user
+      operationId: adminDeductCoin
+      description: Appends a negative ledger entry. Same idempotency rule as grant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CoinAdjustRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoinTxnResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "409":
+          description: Conflict — balance would go negative.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "insufficient balance" }
+
+  /api/v1/admin/coin/leaderboard:
+    get:
+      tags: [Admin (coin)]
+      summary: Top coin holders (e.g. teachers)
+      operationId: adminCoinLeaderboard
+      description: Ranking by current balance. Backs the "top-10 teachers by coin" view.
+      parameters:
+        - name: role
+          in: query
+          description: Restrict the ranking to one role. Defaults to all.
+          schema:
+            type: string
+            enum: [student, teacher]
+        - name: limit
+          in: query
+          description: How many ranks to return (default 10).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoinLeaderboard"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+  /api/v1/admin/users/{userId}/coin/ledger:
+    get:
+      tags: [Admin (coin)]
+      summary: One account's coin ledger
+      operationId: adminCoinLedger
+      description: Append-only history for a single account, newest first.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoinLedgerResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+  /api/v1/admin/audit-logs:
+    get:
+      tags: [Admin (audit)]
+      summary: Query the back-office audit trail
+      operationId: adminListAuditLogs
+      parameters:
+        - name: actor_id
+          in: query
+          description: Filter by the admin who acted.
+          schema:
+            type: string
+            format: uuid
+        - name: action
+          in: query
+          description: Filter by action key, e.g. coin.grant, review.approve.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogListResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -407,6 +739,41 @@ components:
       in: cookie
       name: refresh_token
       description: HttpOnly refresh-token cookie, sent automatically by the browser.
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      description: 1-based page number.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      description: Items per page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    ReviewId:
+      name: reviewId
+      in: path
+      required: true
+      description: Review item id.
+      schema:
+        type: string
+        format: uuid
+    UserId:
+      name: userId
+      in: path
+      required: true
+      description: Target user id.
+      schema:
+        type: string
+        format: uuid
 
   headers:
     RefreshCookie:
@@ -438,6 +805,20 @@ components:
               value: { error: "missing or malformed authorization header" }
             expired:
               value: { error: "invalid or expired token" }
+    ForbiddenError:
+      description: Forbidden — the access token's active role is not admin.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { error: "admin role required" }
+    NotFoundError:
+      description: Not Found — the referenced resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { error: "not found" }
 
   schemas:
     Error:
@@ -637,6 +1018,364 @@ components:
           type: boolean
           description: Server-derived — true once learning_settings is set. Clients read this rather than re-deriving from null.
       required: [user, active_role, onboarded]
+
+    # ── Admin schemas ──────────────────────────────────────────────────
+    AdminProfile:
+      type: object
+      description: The signed-in admin's own identity (Phase A probe).
+      properties:
+        id:
+          type: string
+          format: uuid
+        phone:
+          type: string
+          example: "13800138000"
+        display_name:
+          type: string
+          example: Administrator
+        roles:
+          type: array
+          items:
+            type: string
+          description: All roles the account holds (includes admin).
+          example: [admin]
+        active_role:
+          type: string
+          description: The role this access token is acting as.
+          example: admin
+      required: [id, phone, display_name, roles, active_role]
+
+    PageMeta:
+      type: object
+      description: Pagination envelope shared by admin list endpoints.
+      properties:
+        page:
+          type: integer
+          example: 1
+        page_size:
+          type: integer
+          example: 20
+        total:
+          type: integer
+          format: int64
+          description: Total matching rows across all pages.
+          example: 137
+      required: [page, page_size, total]
+
+    MetricWindow:
+      type: object
+      description: One dashboard card — a total plus common time-window counts.
+      properties:
+        total:
+          type: integer
+          format: int64
+          example: 12335
+        today:
+          type: integer
+          format: int64
+          example: 234
+        last_3_days:
+          type: integer
+          format: int64
+          example: 25
+        last_7_days:
+          type: integer
+          format: int64
+          example: 10
+      required: [total]
+
+    DashboardOverview:
+      type: object
+      description: Back-office home metrics; mirrors the dashboard cards.
+      properties:
+        users:
+          $ref: "#/components/schemas/MetricWindow"
+        tasks:
+          $ref: "#/components/schemas/MetricWindow"
+        smart_vocab:
+          $ref: "#/components/schemas/MetricWindow"
+        coin:
+          $ref: "#/components/schemas/MetricWindow"
+      required: [users, tasks, smart_vocab, coin]
+
+    AdminUser:
+      type: object
+      description: User as seen in the back office — like User, with contact fields and status always visible.
+      properties:
+        id:
+          type: string
+          format: uuid
+        phone:
+          type: string
+          example: "13800138000"
+        email:
+          type: string
+          format: email
+          description: Omitted if not set.
+        display_name:
+          type: string
+          example: Alice
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+        status:
+          type: string
+          enum: [active, disabled]
+          example: active
+        coin_balance:
+          type: integer
+          format: int64
+          description: Current Tiansheng-coin balance (derived from the ledger).
+          example: 2313
+        created_at:
+          type: string
+          format: date-time
+      required: [id, phone, display_name, roles, status, created_at]
+
+    AdminUserListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminUser"
+        page:
+          $ref: "#/components/schemas/PageMeta"
+      required: [items, page]
+
+    ReviewType:
+      type: string
+      enum: [wordlist, teacher_application, comment]
+      description: Which moderation queue an item belongs to.
+
+    ReviewStatus:
+      type: string
+      enum: [pending, approved, rejected]
+
+    ReviewItem:
+      type: object
+      description: |
+        A unified read model over per-entity review fields. `target_id` points at
+        the underlying word list / application / comment.
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          $ref: "#/components/schemas/ReviewType"
+        status:
+          $ref: "#/components/schemas/ReviewStatus"
+        target_id:
+          type: string
+          format: uuid
+        summary:
+          type: string
+          description: Short human label for the queue row (e.g. word-list name).
+          example: 高一上 Unit 3
+        submitted_by:
+          type: string
+          format: uuid
+        reviewed_by:
+          type: string
+          format: uuid
+          description: Set once acted on.
+        reviewed_at:
+          type: string
+          format: date-time
+        reject_reason:
+          type: string
+          description: Present only when status is rejected.
+        created_at:
+          type: string
+          format: date-time
+      required: [id, type, status, target_id, submitted_by, created_at]
+
+    ReviewListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReviewItem"
+        page:
+          $ref: "#/components/schemas/PageMeta"
+      required: [items, page]
+
+    RejectRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          example: 例句与词义不符
+
+    CoinAdjustRequest:
+      type: object
+      description: Body for grant and deduct. `amount` is always positive; the endpoint sets the sign.
+      required: [user_id, amount, idempotency_key]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          example: 100
+        reason:
+          type: string
+          maxLength: 500
+          example: 活动奖励
+        idempotency_key:
+          type: string
+          description: Client-supplied unique key; a replay returns the original entry without re-applying.
+          example: "grant-2026-06-27-alice-001"
+
+    CoinTxnResponse:
+      type: object
+      description: The resulting ledger entry plus the new balance.
+      properties:
+        ledger_entry_id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        delta:
+          type: integer
+          format: int64
+          description: Signed change (positive for grant, negative for deduct).
+          example: 100
+        balance:
+          type: integer
+          format: int64
+          description: Balance after this entry.
+          example: 2413
+        created_at:
+          type: string
+          format: date-time
+      required: [ledger_entry_id, account_id, delta, balance, created_at]
+
+    CoinLeaderboardEntry:
+      type: object
+      properties:
+        rank:
+          type: integer
+          example: 1
+        user_id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+          example: 魏鑫瑶
+        balance:
+          type: integer
+          format: int64
+          example: 2313
+      required: [rank, user_id, display_name, balance]
+
+    CoinLeaderboard:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CoinLeaderboardEntry"
+      required: [items]
+
+    CoinLedgerEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        delta:
+          type: integer
+          format: int64
+          example: -50
+        type:
+          type: string
+          description: Business reason, e.g. grant, deduct, reward, consume.
+          example: grant
+        ref_type:
+          type: string
+          description: Linked business object kind, if any.
+          example: task
+        ref_id:
+          type: string
+          format: uuid
+        operator_id:
+          type: string
+          format: uuid
+          description: Admin who acted; null for system entries.
+        balance_after:
+          type: integer
+          format: int64
+          example: 2263
+        created_at:
+          type: string
+          format: date-time
+      required: [id, delta, type, balance_after, created_at]
+
+    CoinLedgerResponse:
+      type: object
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        balance:
+          type: integer
+          format: int64
+          example: 2313
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CoinLedgerEntry"
+        page:
+          $ref: "#/components/schemas/PageMeta"
+      required: [account_id, balance, items, page]
+
+    AuditLogEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        actor_id:
+          type: string
+          format: uuid
+          description: The admin who performed the action.
+        action:
+          type: string
+          example: coin.grant
+        target_type:
+          type: string
+          example: user
+        target_id:
+          type: string
+          format: uuid
+        detail:
+          type: object
+          additionalProperties: true
+          description: Free-form context (amounts, before/after, reason).
+        created_at:
+          type: string
+          format: date-time
+      required: [id, actor_id, action, created_at]
+
+    AuditLogListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLogEntry"
+        page:
+          $ref: "#/components/schemas/PageMeta"
+      required: [items, page]
 
 security:
   - bearerAuth: []
