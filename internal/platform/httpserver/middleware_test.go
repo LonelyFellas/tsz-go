@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/darwish/tsz-go/internal/admin"
 	"github.com/darwish/tsz-go/internal/auth"
 	applog "github.com/darwish/tsz-go/internal/platform/log"
 )
@@ -20,14 +21,14 @@ import (
 func init() { gin.SetMode(gin.TestMode) }
 
 func TestAuthRequired(t *testing.T) {
-	tm := auth.NewTokenManager("secret", time.Hour)
+	tm := auth.NewTokenManager("secret", time.Hour, auth.RealmWeb)
 	validUser := uuid.New()
 	validToken, _ := tm.Generate(validUser, "student")
 
-	expired := auth.NewTokenManager("secret", -time.Minute)
+	expired := auth.NewTokenManager("secret", -time.Minute, auth.RealmWeb)
 	expiredToken, _ := expired.Generate(uuid.New(), "student")
 
-	wrongSigner := auth.NewTokenManager("other-secret", time.Hour)
+	wrongSigner := auth.NewTokenManager("other-secret", time.Hour, auth.RealmWeb)
 	wrongToken, _ := wrongSigner.Generate(uuid.New(), "student")
 
 	tests := []struct {
@@ -78,7 +79,7 @@ func TestAuthRequired(t *testing.T) {
 }
 
 func TestAuthRequired_ContextRole(t *testing.T) {
-	tm := auth.NewTokenManager("secret", time.Hour)
+	tm := auth.NewTokenManager("secret", time.Hour, auth.RealmWeb)
 	token, _ := tm.Generate(uuid.New(), "teacher")
 
 	w := httptest.NewRecorder()
@@ -103,21 +104,69 @@ func TestAuthRequired_ContextRole(t *testing.T) {
 	}
 }
 
-// RequireRole gates on the active role from the token: 403 unless it matches,
-// pass-through (200) when it does, and 403 when AuthRequired never ran (no role
-// in context). Mounted after AuthRequired in production.
-func TestRequireRole(t *testing.T) {
-	tm := auth.NewTokenManager("secret", time.Hour)
-	adminToken, _ := tm.Generate(uuid.New(), auth.RoleAdmin)
-	studentToken, _ := tm.Generate(uuid.New(), "student")
+// AdminAuthRequired validates an admin-realm token and stores the admin id and
+// level. A web-realm token is rejected (different signing key + realm), so the
+// web/admin boundary holds at the key layer.
+func TestAdminAuthRequired(t *testing.T) {
+	adminTM := auth.NewTokenManager("admin-secret", time.Hour, auth.RealmAdmin)
+	adminID := uuid.New()
+	adminToken, _ := adminTM.Generate(adminID, string(admin.LevelSuperAdmin))
+
+	webTM := auth.NewTokenManager("web-secret", time.Hour, auth.RealmWeb)
+	webToken, _ := webTM.Generate(uuid.New(), "student")
 
 	tests := []struct {
 		name       string
 		header     string
 		wantStatus int
 	}{
-		{"admin passes", "Bearer " + adminToken, http.StatusOK},
-		{"non-admin forbidden", "Bearer " + studentToken, http.StatusForbidden},
+		{"valid admin token", "Bearer " + adminToken, http.StatusOK},
+		{"web token rejected", "Bearer " + webToken, http.StatusUnauthorized},
+		{"missing header", "", http.StatusUnauthorized},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, engine := gin.CreateTestContext(w)
+
+			var gotID any
+			engine.Use(AdminAuthRequired(adminTM))
+			engine.GET("/admin/x", func(c *gin.Context) {
+				gotID = c.MustGet(auth.ContextAdminIDKey)
+				c.Status(http.StatusOK)
+			})
+
+			c.Request = httptest.NewRequest(http.MethodGet, "/admin/x", nil)
+			if tt.header != "" {
+				c.Request.Header.Set("Authorization", tt.header)
+			}
+			engine.ServeHTTP(w, c.Request)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+			if tt.wantStatus == http.StatusOK && gotID != adminID {
+				t.Errorf("context admin id = %v, want %v", gotID, adminID)
+			}
+		})
+	}
+}
+
+// RequireSuperAdmin gates on the admin level: super_admin passes, a plain admin
+// gets 403, and a missing token is 401 (caught upstream by AdminAuthRequired).
+func TestRequireSuperAdmin(t *testing.T) {
+	adminTM := auth.NewTokenManager("admin-secret", time.Hour, auth.RealmAdmin)
+	superToken, _ := adminTM.Generate(uuid.New(), string(admin.LevelSuperAdmin))
+	plainToken, _ := adminTM.Generate(uuid.New(), string(admin.LevelAdmin))
+
+	tests := []struct {
+		name       string
+		header     string
+		wantStatus int
+	}{
+		{"super_admin passes", "Bearer " + superToken, http.StatusOK},
+		{"plain admin forbidden", "Bearer " + plainToken, http.StatusForbidden},
 		{"missing token unauthorized", "", http.StatusUnauthorized},
 	}
 
@@ -127,13 +176,13 @@ func TestRequireRole(t *testing.T) {
 			c, engine := gin.CreateTestContext(w)
 
 			var reached bool
-			engine.Use(AuthRequired(tm), RequireRole(auth.RoleAdmin))
-			engine.GET("/admin/x", func(c *gin.Context) {
+			engine.Use(AdminAuthRequired(adminTM), RequireSuperAdmin())
+			engine.GET("/admin/admins", func(c *gin.Context) {
 				reached = true
 				c.Status(http.StatusOK)
 			})
 
-			c.Request = httptest.NewRequest(http.MethodGet, "/admin/x", nil)
+			c.Request = httptest.NewRequest(http.MethodGet, "/admin/admins", nil)
 			if tt.header != "" {
 				c.Request.Header.Set("Authorization", tt.header)
 			}
@@ -149,16 +198,16 @@ func TestRequireRole(t *testing.T) {
 	}
 }
 
-// RequireRole on its own (no AuthRequired upstream, so no role in context) must
-// abort with 403 rather than pass through.
-func TestRequireRole_NoRoleInContext(t *testing.T) {
+// RequireSuperAdmin on its own (no AdminAuthRequired upstream, so no level in
+// context) must abort with 403 rather than pass through.
+func TestRequireSuperAdmin_NoLevelInContext(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, engine := gin.CreateTestContext(w)
 
-	engine.Use(RequireRole(auth.RoleAdmin))
-	engine.GET("/admin/x", func(c *gin.Context) { c.Status(http.StatusOK) })
+	engine.Use(RequireSuperAdmin())
+	engine.GET("/admin/admins", func(c *gin.Context) { c.Status(http.StatusOK) })
 
-	c.Request = httptest.NewRequest(http.MethodGet, "/admin/x", nil)
+	c.Request = httptest.NewRequest(http.MethodGet, "/admin/admins", nil)
 	engine.ServeHTTP(w, c.Request)
 
 	if w.Code != http.StatusForbidden {

@@ -2,7 +2,6 @@ package user
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -26,7 +25,7 @@ func newTestHandler() (*Handler, *fakeStore, *fakeCodes, *fakeSessions, *auth.To
 	store := newFakeStore()
 	codes := newFakeCodes()
 	sessions := newFakeSessions()
-	tm := auth.NewTokenManager("test-secret", time.Hour)
+	tm := auth.NewTokenManager("test-secret", time.Hour, auth.RealmWeb)
 	return NewHandler(NewService(store, tm, codes, sessions), CookieConfig{MaxAge: time.Hour}, 15*time.Minute, time.Hour), store, codes, sessions, tm
 }
 
@@ -149,7 +148,7 @@ func TestHandler_Register_SuccessShape(t *testing.T) {
 // auth-scoped path. Secure tracks the configured value.
 func TestHandler_RefreshCookieAttributes(t *testing.T) {
 	store := newFakeStore()
-	tm := auth.NewTokenManager("test-secret", time.Hour)
+	tm := auth.NewTokenManager("test-secret", time.Hour, auth.RealmWeb)
 	h := NewHandler(NewService(store, tm, newFakeCodes(), newFakeSessions()), CookieConfig{Secure: true, MaxAge: time.Hour}, 15*time.Minute, time.Hour)
 
 	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"A","role":"student"}`)
@@ -428,7 +427,7 @@ func TestHandler_SwitchRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse token: %v", err)
 	}
-	userID := claims.UserID
+	userID := claims.Subject
 
 	t.Run("200 valid role switch", func(t *testing.T) {
 		w := doJSONAuthed(t, h.SwitchRole, `{"role":"student"}`, userID)
@@ -465,48 +464,14 @@ func TestHandler_SwitchRole(t *testing.T) {
 		}
 	})
 
-	// admin is accepted at the binding layer (so an account that holds admin can
-	// activate it) but this student does not hold it → 403, not a 400.
-	t.Run("403 admin not held", func(t *testing.T) {
+	// admin is not a web role at all (the back office is a separate identity
+	// realm), so it is rejected at the binding layer like any unknown value.
+	t.Run("400 admin is not a web role", func(t *testing.T) {
 		w := doJSONAuthed(t, h.SwitchRole, `{"role":"admin"}`, userID)
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403 (body: %s)", w.Code, w.Body)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body)
 		}
 	})
-}
-
-// TestHandler_SwitchRole_ToHeldAdmin covers the back-office case: an account
-// that already holds admin (e.g. a teacher who was also seeded as admin) can
-// switch its active role to admin and get a token scoped to it. This is the gap
-// the dual-request split fixes — admin must pass binding for switch-role.
-func TestHandler_SwitchRole_ToHeldAdmin(t *testing.T) {
-	h, store, _, _, tm := newTestHandler()
-	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"teacher"}`)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("register status = %d", w.Code)
-	}
-	claims, err := tm.Parse(decode(t, w)["access_token"].(string))
-	if err != nil {
-		t.Fatalf("parse token: %v", err)
-	}
-	userID := claims.UserID
-
-	// Grant admin out of band, mirroring the seed/bootstrap path.
-	if err := store.AddAdminRole(context.Background(), userID); err != nil {
-		t.Fatalf("grant admin: %v", err)
-	}
-
-	w = doJSONAuthed(t, h.SwitchRole, `{"role":"admin"}`, userID)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body)
-	}
-	m := decode(t, w)
-	if m["active_role"] != "admin" {
-		t.Errorf("active_role = %v, want admin", m["active_role"])
-	}
-	if token, _ := m["access_token"].(string); token == "" {
-		t.Error("response missing access_token")
-	}
 }
 
 func TestHandler_AddRole(t *testing.T) {
@@ -519,7 +484,7 @@ func TestHandler_AddRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse token: %v", err)
 	}
-	userID := claims.UserID
+	userID := claims.Subject
 
 	t.Run("201 new role added", func(t *testing.T) {
 		w := doJSONAuthed(t, h.AddRole, `{"role":"teacher"}`, userID)
@@ -698,7 +663,7 @@ func TestHandler_UpdateLearningSettings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse token: %v", err)
 		}
-		return claims.UserID
+		return claims.Subject
 	}
 
 	student := userIDFromRegister(t, `{"phone":"13800138000","email":"s@b.com","password":"password123","display_name":"S","role":"student"}`)
@@ -748,65 +713,6 @@ func TestHandler_UpdateLearningSettings(t *testing.T) {
 		w := doJSONAuthed(t, h.UpdateLearningSettings, `{"cefr_level":"B1","english_variant":"AmE"}`, teacher)
 		if w.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409", w.Code)
-		}
-	})
-}
-
-// doGetAuthed drives a GET handler with both the userID and active role injected
-// into context, simulating a request that has already passed AuthRequired (and,
-// for admin routes, RequireRole).
-func doGetAuthed(t *testing.T, h gin.HandlerFunc, userID uuid.UUID, role string) *httptest.ResponseRecorder {
-	t.Helper()
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-	c.Set(auth.ContextUserIDKey, userID)
-	c.Set(auth.ContextRoleKey, role)
-	h(c)
-	return w
-}
-
-// AdminProfile returns the signed-in admin's identity. The 401/403 cases are the
-// middleware's job, so here we exercise the 200 (identity shaped per contract)
-// and 404 (account vanished) branches the handler owns.
-func TestHandler_AdminProfile(t *testing.T) {
-	t.Run("200 returns identity", func(t *testing.T) {
-		h, store, _, _, _ := newTestHandler()
-		ctx := context.Background()
-		admin, err := h.svc.SeedAdmin(ctx, "13800138000", "adminpass123", "Administrator")
-		if err != nil {
-			t.Fatalf("seed admin: %v", err)
-		}
-		_ = store
-
-		w := doGetAuthed(t, h.AdminProfile, admin.ID, string(RoleAdmin))
-		if w.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200", w.Code)
-		}
-		body := decode(t, w)
-		if body["id"] != admin.ID.String() {
-			t.Errorf("id = %v, want %s", body["id"], admin.ID)
-		}
-		if body["phone"] != "13800138000" {
-			t.Errorf("phone = %v, want 13800138000", body["phone"])
-		}
-		if body["display_name"] != "Administrator" {
-			t.Errorf("display_name = %v, want Administrator", body["display_name"])
-		}
-		if body["active_role"] != "admin" {
-			t.Errorf("active_role = %v, want admin", body["active_role"])
-		}
-		roles, _ := body["roles"].([]any)
-		if len(roles) != 1 || roles[0] != "admin" {
-			t.Errorf("roles = %v, want [admin]", body["roles"])
-		}
-	})
-
-	t.Run("404 when account is gone", func(t *testing.T) {
-		h, _, _, _, _ := newTestHandler()
-		w := doGetAuthed(t, h.AdminProfile, uuid.New(), string(RoleAdmin))
-		if w.Code != http.StatusNotFound {
-			t.Fatalf("status = %d, want 404", w.Code)
 		}
 	})
 }

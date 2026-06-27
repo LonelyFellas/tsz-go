@@ -15,17 +15,12 @@ type Role string
 const (
 	RoleStudent Role = "student"
 	RoleTeacher Role = "teacher"
-	// RoleAdmin is the back-office role. It gates the /api/v1/admin/* API and is
-	// never self-assignable: registration stays limited to student/teacher and the
-	// first admin is bootstrapped out of band (see cmd/seed).
-	RoleAdmin Role = "admin"
 )
 
-// Valid reports whether r is a known role. RoleAdmin is valid here (e.g. for the
-// admin gate), but Register independently restricts the roles a user may grant
-// themselves to student/teacher — see RegisterRequest's binding tag.
+// Valid reports whether r is a known role. The back office is a separate identity
+// realm (see internal/admin), so admin is deliberately not a web role here.
 func (r Role) Valid() bool {
-	return r == RoleStudent || r == RoleTeacher || r == RoleAdmin
+	return r == RoleStudent || r == RoleTeacher
 }
 
 // UserStatus is an account's lifecycle state. A disabled account is rejected at

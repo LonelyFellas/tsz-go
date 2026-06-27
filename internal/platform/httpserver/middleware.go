@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/darwish/tsz-go/internal/admin"
 	"github.com/darwish/tsz-go/internal/auth"
 	applog "github.com/darwish/tsz-go/internal/platform/log"
 )
@@ -100,36 +101,64 @@ func RequestLogger() gin.HandlerFunc {
 	}
 }
 
-// AuthRequired validates the Bearer token and stores the user ID in context.
+// bearerToken extracts the token from an "Authorization: Bearer <token>" header,
+// reporting ok=false if the header is absent or malformed.
+func bearerToken(c *gin.Context) (string, bool) {
+	parts := strings.SplitN(c.GetHeader("Authorization"), " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
+		return "", false
+	}
+	return parts[1], true
+}
+
+// AuthRequired validates a web-realm Bearer token and stores the user ID and
+// active role in context. An admin-realm token fails verification here (different
+// signing key + realm) and is rejected as unauthorized.
 func AuthRequired(tm *auth.TokenManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		header := c.GetHeader("Authorization")
-		parts := strings.SplitN(header, " ", 2)
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		token, ok := bearerToken(c)
+		if !ok {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing or malformed authorization header"})
 			return
 		}
-
-		claims, err := tm.Parse(parts[1])
+		claims, err := tm.Parse(token)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
 			return
 		}
-
-		c.Set(auth.ContextUserIDKey, claims.UserID)
+		c.Set(auth.ContextUserIDKey, claims.Subject)
 		c.Set(auth.ContextRoleKey, claims.Role)
 		c.Next()
 	}
 }
 
-// RequireRole gates a route on the token's active role, aborting with 403 unless
-// it matches. Mount it AFTER AuthRequired (which populates the role in context);
-// on its own it has no token to read. The role comparison is against the active
-// role only — a multi-role account must switch into the role first.
-func RequireRole(role string) gin.HandlerFunc {
+// AdminAuthRequired validates an admin-realm Bearer token and stores the admin ID
+// and level in context. A web-realm token fails verification here, so the web/
+// admin boundary holds at the signing-key layer, not just by convention.
+func AdminAuthRequired(tm *auth.TokenManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if got, _ := c.Get(auth.ContextRoleKey); got != role {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "admin role required"})
+		token, ok := bearerToken(c)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing or malformed authorization header"})
+			return
+		}
+		claims, err := tm.Parse(token)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
+			return
+		}
+		c.Set(auth.ContextAdminIDKey, claims.Subject)
+		c.Set(auth.ContextAdminLevelKey, claims.Role)
+		c.Next()
+	}
+}
+
+// RequireSuperAdmin gates a route on the admin's level, aborting with 403 unless
+// it is super_admin. Mount it AFTER AdminAuthRequired (which populates the level).
+func RequireSuperAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if got, _ := c.Get(auth.ContextAdminLevelKey); got != string(admin.LevelSuperAdmin) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "super admin required"})
 			return
 		}
 		c.Next()

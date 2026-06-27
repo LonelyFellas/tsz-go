@@ -32,13 +32,11 @@ const codePurposeLogin = "login"
 // concrete *Repository satisfies it in production.
 type Store interface {
 	Create(ctx context.Context, u *User, role Role) error
-	CreateAdmin(ctx context.Context, u *User) error
 	GetByEmail(ctx context.Context, email string) (*User, error)
 	GetByPhone(ctx context.Context, phone string) (*User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*User, error)
 	HasRole(ctx context.Context, userID uuid.UUID, role Role) (bool, error)
 	AddRole(ctx context.Context, userID uuid.UUID, role Role) error
-	AddAdminRole(ctx context.Context, userID uuid.UUID) error
 	SetActiveRole(ctx context.Context, userID uuid.UUID, role Role) error
 	GetLearningSettings(ctx context.Context, userID uuid.UUID) (*LearningSettings, error)
 	SetLearningSettings(ctx context.Context, userID uuid.UUID, s *LearningSettings) error
@@ -247,55 +245,6 @@ func (s *Service) AddRole(ctx context.Context, userID uuid.UUID, role Role) (str
 		return "", fmt.Errorf("generate token: %w", err)
 	}
 	return tok, nil
-}
-
-// SeedAdmin ensures an admin account exists for the given phone, idempotently. It
-// is the out-of-band bootstrap for the first back-office user (see cmd/seed) —
-// admin is never self-registered. Behavior:
-//
-//   - phone unknown → create the account with the admin role.
-//   - phone known, lacks admin → grant the admin role (password/display name of an
-//     existing account are left untouched).
-//   - phone known, already admin → no-op.
-//
-// Re-running is safe: it never duplicates an account and never errors on "already
-// an admin". The returned user reflects the resulting account.
-func (s *Service) SeedAdmin(ctx context.Context, phone, password, displayName string) (*User, error) {
-	phone = normalizePhone(phone)
-
-	existing, err := s.repo.GetByPhone(ctx, phone)
-	switch {
-	case err == nil:
-		// Account exists; grant admin if it is missing, otherwise nothing to do.
-		has, err := s.repo.HasRole(ctx, existing.ID, RoleAdmin)
-		if err != nil {
-			return nil, err
-		}
-		if !has {
-			if err := s.repo.AddAdminRole(ctx, existing.ID); err != nil {
-				return nil, err
-			}
-		}
-		return s.repo.GetByID(ctx, existing.ID)
-	case errors.Is(err, ErrNotFound):
-		// No such account; create it fresh with the admin role.
-		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-		if err != nil {
-			return nil, fmt.Errorf("hash password: %w", err)
-		}
-		u := &User{
-			ID:           uuid.New(),
-			Phone:        phone,
-			PasswordHash: string(hash),
-			DisplayName:  strings.TrimSpace(displayName),
-		}
-		if err := s.repo.CreateAdmin(ctx, u); err != nil {
-			return nil, err
-		}
-		return u, nil
-	default:
-		return nil, err
-	}
 }
 
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {

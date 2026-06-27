@@ -1,17 +1,18 @@
-// Command seed bootstraps the first back-office admin and exits.
+// Command seed bootstraps the first back-office super-admin and exits.
 //
-// Admin is never self-registered (registration is limited to student/teacher),
-// so the first admin is created out of band by this one-shot command — mirroring
-// ./cmd/migrate's "separate, controlled step" model rather than running on every
-// boot. It is idempotent: re-running never duplicates an account and never errors
-// if the admin already exists, so it is safe to wire into a deploy step.
+// Admin is never self-registered, so the first account — a super_admin who then
+// creates the rest from the console — is created out of band by this one-shot
+// command, mirroring ./cmd/migrate's "separate, controlled step" model rather
+// than running on every boot. It is idempotent: re-running never duplicates an
+// account and never errors if the admin already exists, so it is safe to wire
+// into a deploy step.
 //
 // It reads its configuration straight from the environment (no config.Load), the
 // same way ./cmd/migrate does:
 //
 //   - DATABASE_URL          (required) — same DSN the server uses
-//   - SEED_ADMIN_PHONE      (required) — the admin's login phone
-//   - SEED_ADMIN_PASSWORD   (required) — the admin's password (used only on create)
+//   - SEED_ADMIN_PHONE      (required) — the super-admin's login phone
+//   - SEED_ADMIN_PASSWORD   (required) — the password (used only on create)
 //   - SEED_ADMIN_DISPLAY_NAME (optional) — defaults to "Administrator"
 package main
 
@@ -19,9 +20,9 @@ import (
 	"context"
 	"os"
 
+	"github.com/darwish/tsz-go/internal/admin"
 	"github.com/darwish/tsz-go/internal/platform/database"
 	applog "github.com/darwish/tsz-go/internal/platform/log"
-	"github.com/darwish/tsz-go/internal/user"
 )
 
 const defaultAdminDisplayName = "Administrator"
@@ -58,15 +59,15 @@ func main() {
 	}
 	defer pool.Close()
 
-	// SeedAdmin only touches the repository, so the token/codes/sessions
+	// SeedSuperAdmin only touches the repository, so the token/session
 	// dependencies of the full service are irrelevant here and passed as nil.
-	svc := user.NewService(user.NewRepository(pool), nil, nil, nil)
+	svc := admin.NewService(admin.NewRepository(pool), nil, nil)
 
-	u, err := svc.SeedAdmin(ctx, phone, password, displayName)
+	a, err := svc.SeedSuperAdmin(ctx, phone, password, displayName)
 	if err != nil {
-		logger.Error("seed admin failed", "err", err)
+		logger.Error("seed super-admin failed", "err", err)
 		os.Exit(1)
 	}
 
-	logger.Info("admin seeded", "id", u.ID, "phone", u.Phone)
+	logger.Info("super-admin seeded", "id", a.ID, "phone", a.Phone, "level", a.Level)
 }

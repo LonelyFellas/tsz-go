@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/darwish/tsz-go/docs"
+	"github.com/darwish/tsz-go/internal/admin"
 	"github.com/darwish/tsz-go/internal/auth"
 	"github.com/darwish/tsz-go/internal/config"
 	"github.com/darwish/tsz-go/internal/otp"
@@ -60,8 +61,9 @@ func run() error {
 		slog.Info("migrations applied")
 	}
 
-	// Dependency wiring: repository -> service -> handler.
-	tokenManager := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
+	// Dependency wiring: repository -> service -> handler. Web tokens use the web
+	// realm + JWTSecret.
+	tokenManager := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL, auth.RealmWeb)
 
 	// Verification codes (OTP). The mock sender just logs the code; swap in a
 	// real SMS/email provider here when that integration lands.
@@ -78,6 +80,18 @@ func run() error {
 		Secure: cfg.Env != "development",
 		MaxAge: cfg.RefreshTokenTTL,
 	}, cfg.JWTTTL, cfg.RefreshTokenTTL)
+
+	// Back office: a separate identity realm. Its own signing key (AdminJWTSecret,
+	// distinct from JWTSecret) is what makes a web token fail on admin routes and
+	// vice versa; its refresh tokens live in a separate table behind their own
+	// session service.
+	adminTokenManager := auth.NewTokenManager(cfg.AdminJWTSecret, cfg.AdminJWTTTL, auth.RealmAdmin)
+	adminSessionService := session.NewService(admin.NewSessionRepository(pool), cfg.AdminRefreshTokenTTL)
+	adminService := admin.NewService(admin.NewRepository(pool), adminTokenManager, adminSessionService)
+	adminHandler := admin.NewHandler(adminService, admin.CookieConfig{
+		Secure: cfg.Env != "development",
+		MaxAge: cfg.AdminRefreshTokenTTL,
+	}, cfg.AdminJWTTTL, cfg.AdminRefreshTokenTTL)
 
 	// Per-IP throttle on the public auth endpoints; disabled when configured
 	// to 0. Idle buckets are evicted after a fixed window so memory is bounded.
@@ -113,14 +127,16 @@ func run() error {
 	}
 
 	router := httpserver.NewRouter(httpserver.Deps{
-		TokenManager:    tokenManager,
-		UserHandler:     userHandler,
-		OpenAPISpec:     docs.OpenAPISpec,
-		EnableDocs:      cfg.DocsEnabled,
-		AuthRateLimiter: authRateLimiter,
-		DB:              pool,
-		Metrics:         metrics,
-		ServiceName:     cfg.ServiceName,
+		TokenManager:      tokenManager,
+		UserHandler:       userHandler,
+		AdminTokenManager: adminTokenManager,
+		AdminHandler:      adminHandler,
+		OpenAPISpec:       docs.OpenAPISpec,
+		EnableDocs:        cfg.DocsEnabled,
+		AuthRateLimiter:   authRateLimiter,
+		DB:                pool,
+		Metrics:           metrics,
+		ServiceName:       cfg.ServiceName,
 	})
 
 	srv := &http.Server{

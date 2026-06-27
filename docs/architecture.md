@@ -239,6 +239,11 @@ QuestionBank ──< Question
 管理后台与学员端、教师端共用**同一套 tsz-go API 与数据库**，不拆独立服务。
 后台接口统一挂在 `/api/v1/admin/...`，由 admin 鉴权中间件保护。
 
+但**身份是两套独立的库**：admin 账号存 `admins` 表，与 web 端 `users` 完全分离——
+互不能登录、互不能使用，同一手机号可在两边各存一个无关联账号。隔离由 admin 独立的 JWT
+签名密钥强制（web token 拿到 admin 接口验签即失败）。完整设计与前端对接见
+[user-module-design.md](user-module-design.md)，本节只讲后台业务（审核 / 天生币 / 审计 / 看板）。
+
 ```
                 /api/v1/admin/...
         ┌───────────────┬───────────────┬──────────────┐
@@ -249,14 +254,21 @@ QuestionBank ──< Question
                         同一 PostgreSQL
 ```
 
-### 9.1 后台权限
+### 9.1 后台身份与权限
 
-原型「审核管理」为独立菜单，意味着可能存在**专职审核员 ≠ 超管**。但初期不上完整 RBAC：
+身份模型见 [user-module-design.md](user-module-design.md)，要点：
 
-- 新增角色 `admin`（现仅 `student` / `teacher`）
-- 加权限点枚举列：`user_admin`、`review`、`coin`、`content`、`setting`
-- 中间件按**权限点**校验，而非只看角色；不够用再演进为角色-权限表
-- 后台可见学员联系方式（教师端仍脱敏，见第 7 节）
+- **独立身份库 `admins`**，与 `users` 分表；`admins.level ∈ {admin, super_admin}`
+  （web 端 `user_roles` 收回 `student`/`teacher`，不再有 admin）。
+- 登录走 `/api/v1/admin/auth/login`，签发 `realm=admin` 且用 **独立密钥**
+  （`ADMIN_JWT_SECRET`）签名的 access token；中间件 `AdminAuthRequired` 验签 + 验 realm。
+- **超管专属**：建/禁用 admin 账号需 `super_admin`（`RequireSuperAdmin` → 403）。首个超管由
+  `cmd/seed` 带外引导。
+- 后台可见学员联系方式（教师端仍脱敏，见第 7 节）。
+
+初期**不上细粒度 RBAC**：单 `admin` 层级即可操作审核/天生币/看板，super_admin 仅多出账号管理。
+原型「审核管理」独立菜单暗示可能出现**专职审核员 ≠ 超管**——等真有这需求，再在 admin 库内加
+权限点枚举（`review`/`coin`/`content`/`setting`…）按点校验，而非现在过早 RBAC。
 
 ### 9.2 审核管理（review）
 

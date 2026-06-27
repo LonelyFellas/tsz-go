@@ -273,21 +273,17 @@ func (h *Handler) LogoutAll(c *gin.Context) {
 	c.Writer.WriteHeaderNow()
 }
 
-// roleRequest is the add-role payload: it deliberately accepts only the
-// self-service roles (student, teacher). admin is excluded at the binding layer
-// because AddRole grants the caller a role on themselves — allowing admin here
-// would let any authenticated user self-promote to the back office. Granting
-// admin is an out-of-band operation (see Service.SeedAdmin).
+// roleRequest is the add-role payload. The back office is a separate identity
+// realm (see internal/admin), so the only roles in play here are the self-service
+// student/teacher ones.
 type roleRequest struct {
 	Role string `json:"role" binding:"required,oneof=student teacher"`
 }
 
-// switchRoleRequest is the switch-role payload. Unlike roleRequest it also
-// accepts admin, because switching only ever activates a role the caller
-// *already holds* — Service.SwitchRole gates on HasRole — so it cannot be used
-// to acquire admin, only to make an existing admin identity the active one.
+// switchRoleRequest is the switch-role payload: activate a role the caller
+// already holds (student or teacher).
 type switchRoleRequest struct {
-	Role string `json:"role" binding:"required,oneof=student teacher admin"`
+	Role string `json:"role" binding:"required,oneof=student teacher"`
 }
 
 // SwitchRole re-issues a token scoped to a role the user already holds.
@@ -364,45 +360,6 @@ func (h *Handler) Me(c *gin.Context) {
 		"active_role":       activeRole,
 		"learning_settings": settings,
 		"onboarded":         settings != nil,
-	})
-}
-
-// adminProfileResponse is the AdminProfile contract (see openapi.yaml): the
-// signed-in admin's own identity, used by the console to confirm the role gate
-// and render a "signed in as …" header.
-type adminProfileResponse struct {
-	ID          uuid.UUID `json:"id"`
-	Phone       string    `json:"phone"`
-	DisplayName string    `json:"display_name"`
-	Roles       []Role    `json:"roles"`
-	ActiveRole  string    `json:"active_role"`
-}
-
-// AdminProfile returns the signed-in admin's identity. It is the Phase A probe
-// behind the admin gate: the 401/403 cases are handled upstream by AuthRequired +
-// RequireRole, so this handler only ever sees an authenticated admin and just
-// needs to load and shape the identity (200, or 404 if the account vanished).
-func (h *Handler) AdminProfile(c *gin.Context) {
-	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
-	activeRole, _ := c.Get(auth.ContextRoleKey)
-
-	u, err := h.svc.GetByID(c.Request.Context(), userID)
-	switch {
-	case errors.Is(err, ErrNotFound):
-		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
-		return
-	case err != nil:
-		internalError(c, err)
-		return
-	}
-
-	role, _ := activeRole.(string)
-	c.JSON(http.StatusOK, adminProfileResponse{
-		ID:          u.ID,
-		Phone:       u.Phone,
-		DisplayName: u.DisplayName,
-		Roles:       u.Roles,
-		ActiveRole:  role,
 	})
 }
 

@@ -20,7 +20,14 @@ type Config struct {
 	// RefreshTokenTTL is the refresh-token lifetime (default 30d). Refresh tokens
 	// are tracked server-side and rotated on every use.
 	RefreshTokenTTL time.Duration
-	OTPCodeTTL      time.Duration
+	// AdminJWTSecret signs back-office (admin realm) access tokens. It MUST differ
+	// from JWTSecret: the separate key is what makes a web token fail verification
+	// on the admin API and vice versa. AdminJWTTTL / AdminRefreshTokenTTL mirror the
+	// web TTLs but can be set shorter for the higher-privilege realm.
+	AdminJWTSecret       string
+	AdminJWTTTL          time.Duration
+	AdminRefreshTokenTTL time.Duration
+	OTPCodeTTL           time.Duration
 	// OTPResendCooldown is the minimum gap between two codes to the same target
 	// (default 60s); OTPDailyLimit caps codes per target per rolling 24h (default
 	// 10). Together they bound SMS/email cost and abuse. 0 disables either limit.
@@ -61,24 +68,27 @@ type Config struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		Port:                getenv("PORT", "8080"),
-		DatabaseURL:         os.Getenv("DATABASE_URL"),
-		JWTSecret:           os.Getenv("JWT_SECRET"),
-		JWTTTL:              getdur("JWT_TTL", 15*time.Minute),
-		RefreshTokenTTL:     getdur("REFRESH_TOKEN_TTL", 720*time.Hour),
-		OTPCodeTTL:          getdur("OTP_CODE_TTL", 5*time.Minute),
-		OTPResendCooldown:   getdur("OTP_RESEND_COOLDOWN", 60*time.Second),
-		OTPDailyLimit:       getint("OTP_DAILY_LIMIT", 10),
-		AuthRateLimitPerMin: getint("AUTH_RATE_LIMIT_PER_MIN", 30),
-		AuthRateBurst:       getint("AUTH_RATE_BURST", 10),
-		Env:                 getenv("APP_ENV", "development"),
-		LogLevel:            getenv("LOG_LEVEL", "info"),
-		AutoMigrate:         getbool("AUTO_MIGRATE", false),
-		DocsEnabled:         getbool("DOCS_ENABLED", true),
-		MetricsEnabled:      getbool("METRICS_ENABLED", true),
-		TracingEndpoint:     os.Getenv("TRACING_ENDPOINT"),
-		TracingInsecure:     getbool("TRACING_INSECURE", true),
-		ServiceName:         getenv("SERVICE_NAME", "tsz-go"),
+		Port:                 getenv("PORT", "8080"),
+		DatabaseURL:          os.Getenv("DATABASE_URL"),
+		JWTSecret:            os.Getenv("JWT_SECRET"),
+		JWTTTL:               getdur("JWT_TTL", 15*time.Minute),
+		RefreshTokenTTL:      getdur("REFRESH_TOKEN_TTL", 720*time.Hour),
+		AdminJWTSecret:       os.Getenv("ADMIN_JWT_SECRET"),
+		AdminJWTTTL:          getdur("ADMIN_JWT_TTL", 15*time.Minute),
+		AdminRefreshTokenTTL: getdur("ADMIN_REFRESH_TOKEN_TTL", 720*time.Hour),
+		OTPCodeTTL:           getdur("OTP_CODE_TTL", 5*time.Minute),
+		OTPResendCooldown:    getdur("OTP_RESEND_COOLDOWN", 60*time.Second),
+		OTPDailyLimit:        getint("OTP_DAILY_LIMIT", 10),
+		AuthRateLimitPerMin:  getint("AUTH_RATE_LIMIT_PER_MIN", 30),
+		AuthRateBurst:        getint("AUTH_RATE_BURST", 10),
+		Env:                  getenv("APP_ENV", "development"),
+		LogLevel:             getenv("LOG_LEVEL", "info"),
+		AutoMigrate:          getbool("AUTO_MIGRATE", false),
+		DocsEnabled:          getbool("DOCS_ENABLED", true),
+		MetricsEnabled:       getbool("METRICS_ENABLED", true),
+		TracingEndpoint:      os.Getenv("TRACING_ENDPOINT"),
+		TracingInsecure:      getbool("TRACING_INSECURE", true),
+		ServiceName:          getenv("SERVICE_NAME", "tsz-go"),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -86,6 +96,12 @@ func Load() (Config, error) {
 	}
 	if cfg.JWTSecret == "" {
 		return cfg, fmt.Errorf("config: JWT_SECRET is required")
+	}
+	if cfg.AdminJWTSecret == "" {
+		return cfg, fmt.Errorf("config: ADMIN_JWT_SECRET is required")
+	}
+	if cfg.AdminJWTSecret == cfg.JWTSecret {
+		return cfg, fmt.Errorf("config: ADMIN_JWT_SECRET must differ from JWT_SECRET (realm isolation)")
 	}
 	return cfg, nil
 }

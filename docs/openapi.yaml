@@ -22,8 +22,19 @@ info:
     Login is **strict single-device**: each successful login/register revokes the
     user's previous sessions, and using the refresh cookie rotates it.
 
+    ### Two identity realms
+
+    The above is the **web** realm (students/teachers). The **admin** back office
+    is a *separate* identity store (`admins` table) with its own login
+    (`/api/v1/admin/auth/*`), its own signing key (`ADMIN_JWT_SECRET`,
+    `adminBearerAuth`), and its own refresh cookie (`admin_refresh_token`, scoped
+    to `Path=/api/v1/admin`). A web token can never pass an admin endpoint and an
+    admin token can never pass a web endpoint — each fails signature verification
+    under the other realm's key. Admin is not self-registerable; the first
+    super_admin is seeded out of band.
+
     See `docs/api.md` for the full rationale, 401-handling decision tree, and
-    frontend integration guide.
+    frontend integration guide; `docs/user-module-design.md` for the realm model.
   version: 1.0.0
 servers:
   - url: http://localhost:8080
@@ -38,21 +49,30 @@ tags:
     description: Auth operations that require a valid access token (role and session management).
   - name: User
     description: The authenticated user's own profile.
+  - name: Admin (auth)
+    description: |
+      Back-office login/session and the signed-in admin's identity. Separate
+      identity realm (`admins` table) with its own signing key — see the "Two
+      identity realms" note and docs/user-module-design.md.
+  - name: Admin (accounts)
+    description: |
+      Super-admin management of admin accounts (create, list, enable/disable).
+      Requires a super_admin-level token (403 `super admin required` otherwise).
   - name: Admin (dashboard)
-    description: Back-office home metrics. Requires the admin role.
+    description: Back-office home metrics. Requires an admin-realm token.
   - name: Admin (users)
-    description: Back-office user administration (teachers and students). Requires the admin role.
+    description: Back-office administration of web users (teachers and students). Requires an admin-realm token.
   - name: Admin (review)
     description: |
       Moderation queue — word lists, teacher applications, comments. One API
       surface over per-entity status fields (see docs/architecture.md §9.2).
-      Requires the admin role.
+      Requires an admin-realm token.
   - name: Admin (coin)
     description: |
       Tiansheng-coin administration — grant, deduct, leaderboard, per-account
-      ledger. Backed by an append-only ledger (see §9.3). Requires the admin role.
+      ledger. Backed by an append-only ledger (see §9.3). Requires an admin-realm token.
   - name: Admin (audit)
-    description: Read-only audit trail of sensitive back-office actions (§9.4). Requires the admin role.
+    description: Read-only audit trail of sensitive back-office actions (§9.4). Requires an admin-realm token.
 
 paths:
   /healthz:
@@ -411,15 +431,236 @@ paths:
               example: { error: "user already has this role" }
 
   # ── Admin (back office) ──────────────────────────────────────────────
-  # All /api/v1/admin/* endpoints require an access token whose active role is
-  # admin; the admin middleware returns 403 otherwise. Design-only here — no
-  # handlers are generated for these (apigen is scoped to getCurrentUser).
+  # All /api/v1/admin/* endpoints take an ADMIN-realm token (adminBearerAuth),
+  # which is a different identity store and signing key from the web realm — a web
+  # token is rejected with 401, not 403. 403 is reserved for privilege within the
+  # admin realm (super_admin). Each operation sets `security: [adminBearerAuth]` to
+  # override the global web default. Most are design-only — no handlers are
+  # generated for these (apigen is scoped to getCurrentUser).
+
+  /api/v1/admin/auth/login:
+    post:
+      tags: [Admin (auth)]
+      summary: Admin login (identifier + password)
+      operationId: adminLogin
+      description: |
+        Authenticates against the `admins` table and returns an admin-realm access
+        token plus an `admin_refresh_token` cookie. Password only — no SMS-code
+        login for admin. Not self-registerable; accounts come from seed or a
+        super_admin.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminLoginRequest"
+      responses:
+        "200":
+          description: OK
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/AdminRefreshCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAuthResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: Unauthorized — wrong credentials.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "invalid credentials" }
+        "403":
+          description: Forbidden — the admin account is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "account disabled" }
+
+  /api/v1/admin/auth/refresh:
+    post:
+      tags: [Admin (auth)]
+      summary: Rotate admin refresh token → new access token
+      operationId: adminRefreshToken
+      description: Exchanges the `admin_refresh_token` cookie for a new admin access token. No body.
+      security:
+        - adminRefreshCookie: []
+      responses:
+        "200":
+          description: OK
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/AdminRefreshCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshResponse"
+        "401":
+          description: |
+            Unauthorized — missing/invalid/revoked/expired cookie, or the account
+            was disabled. The session is over — re-login.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                missing:
+                  value: { error: "missing refresh token" }
+                invalid:
+                  value: { error: "invalid refresh token" }
+
+  /api/v1/admin/auth/logout:
+    post:
+      tags: [Admin (auth)]
+      summary: Revoke the current admin refresh token
+      operationId: adminLogout
+      description: Revokes the admin refresh token carried by the cookie and clears it. Idempotent.
+      security:
+        - adminRefreshCookie: []
+      responses:
+        "204":
+          description: No Content. The admin refresh cookie is expired via `Set-Cookie`.
+
+  /api/v1/admin/auth/logout-all:
+    post:
+      tags: [Admin (auth)]
+      summary: Revoke every admin refresh token (logout everywhere)
+      operationId: adminLogoutAll
+      description: Revokes every refresh token the signed-in admin holds. Idempotent.
+      security:
+        - adminBearerAuth: []
+      responses:
+        "204":
+          description: No Content (also if the admin has no active sessions).
+        "401":
+          $ref: "#/components/responses/AuthError"
+
+  /api/v1/admin/admins:
+    post:
+      tags: [Admin (accounts)]
+      summary: Create an admin account (super_admin only)
+      operationId: adminCreateAdmin
+      description: Creates a new admin. Requires a super_admin token.
+      security:
+        - adminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAdminRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Admin"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "409":
+          description: Conflict — phone already registered as an admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "phone already registered" }
+    get:
+      tags: [Admin (accounts)]
+      summary: List admin accounts (super_admin only)
+      operationId: adminListAdmins
+      security:
+        - adminBearerAuth: []
+      parameters:
+        - name: level
+          in: query
+          description: Filter by level.
+          schema:
+            $ref: "#/components/schemas/AdminLevel"
+        - name: q
+          in: query
+          description: Free-text match on phone / email / display name.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminListResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+
+  /api/v1/admin/admins/{adminId}/status:
+    patch:
+      tags: [Admin (accounts)]
+      summary: Enable/disable an admin account (super_admin only)
+      operationId: adminSetAdminStatus
+      description: |
+        Enables or disables an admin. A disabled admin is rejected at login and
+        refresh, so it takes effect within one access-token TTL.
+
+        Disabling the last active `super_admin` is refused with `409` to prevent
+        locking the back office out of all account management.
+      security:
+        - adminBearerAuth: []
+      parameters:
+        - name: adminId
+          in: path
+          required: true
+          description: Target admin id.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminStatusRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Admin"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "409":
+          description: Cannot disable the last active super_admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /api/v1/admin/stats/overview:
     get:
       tags: [Admin (dashboard)]
       summary: Back-office home metrics
       operationId: adminStatsOverview
+      security:
+        - adminBearerAuth: []
       description: |
         Aggregated counts for the dashboard cards (users, tasks, smart vocab,
         coin). At current scale these are direct COUNT(*) + time-window queries.
@@ -437,12 +678,15 @@ paths:
 
   /api/v1/admin/profile:
     get:
-      tags: [Admin (users)]
+      tags: [Admin (auth)]
       summary: Current admin's own identity
       operationId: adminProfile
+      security:
+        - adminBearerAuth: []
       description: |
-        Phase A probe behind the admin gate. Lets the console confirm the role
-        gate (200 for admin, 403 otherwise) and render a "signed in as …" header.
+        The back-office gate probe. Lets the console confirm the token is a valid
+        admin (200, else 401) and render a "signed in as …" header; `level` drives
+        whether super-admin-only menus show.
       responses:
         "200":
           description: OK
@@ -462,6 +706,8 @@ paths:
       tags: [Admin (users)]
       summary: List users (teachers / students)
       operationId: adminListUsers
+      security:
+        - adminBearerAuth: []
       description: Back-office user directory. Unlike the teacher view, contact fields are visible.
       parameters:
         - name: role
@@ -469,7 +715,7 @@ paths:
           description: Filter by held role.
           schema:
             type: string
-            enum: [student, teacher, admin]
+            enum: [student, teacher]
         - name: q
           in: query
           description: Free-text match on phone / email / display name.
@@ -494,6 +740,8 @@ paths:
       tags: [Admin (review)]
       summary: List items awaiting (or past) review
       operationId: adminListReviews
+      security:
+        - adminBearerAuth: []
       parameters:
         - name: type
           in: query
@@ -527,6 +775,8 @@ paths:
       tags: [Admin (review)]
       summary: Approve a review item
       operationId: adminApproveReview
+      security:
+        - adminBearerAuth: []
       description: Transitions the target to approved and writes an audit entry. Idempotent.
       parameters:
         - $ref: "#/components/parameters/ReviewId"
@@ -549,6 +799,8 @@ paths:
       tags: [Admin (review)]
       summary: Reject a review item
       operationId: adminRejectReview
+      security:
+        - adminBearerAuth: []
       description: Transitions the target to rejected with a reason and writes an audit entry.
       parameters:
         - $ref: "#/components/parameters/ReviewId"
@@ -579,6 +831,8 @@ paths:
       tags: [Admin (coin)]
       summary: Grant coin to a user
       operationId: adminGrantCoin
+      security:
+        - adminBearerAuth: []
       description: |
         Appends a positive ledger entry inside a transaction. `idempotency_key`
         makes a retried grant a no-op (returns the original entry).
@@ -609,6 +863,8 @@ paths:
       tags: [Admin (coin)]
       summary: Deduct coin from a user
       operationId: adminDeductCoin
+      security:
+        - adminBearerAuth: []
       description: Appends a negative ledger entry. Same idempotency rule as grant.
       requestBody:
         required: true
@@ -644,6 +900,8 @@ paths:
       tags: [Admin (coin)]
       summary: Top coin holders (e.g. teachers)
       operationId: adminCoinLeaderboard
+      security:
+        - adminBearerAuth: []
       description: Ranking by current balance. Backs the "top-10 teachers by coin" view.
       parameters:
         - name: role
@@ -677,6 +935,8 @@ paths:
       tags: [Admin (coin)]
       summary: One account's coin ledger
       operationId: adminCoinLedger
+      security:
+        - adminBearerAuth: []
       description: Append-only history for a single account, newest first.
       parameters:
         - $ref: "#/components/parameters/UserId"
@@ -701,6 +961,8 @@ paths:
       tags: [Admin (audit)]
       summary: Query the back-office audit trail
       operationId: adminListAuditLogs
+      security:
+        - adminBearerAuth: []
       parameters:
         - name: actor_id
           in: query
@@ -733,12 +995,25 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: "Access token: `Authorization: Bearer <access_token>`."
+      description: "Web-realm access token: `Authorization: Bearer <access_token>`."
     refreshCookie:
       type: apiKey
       in: cookie
       name: refresh_token
-      description: HttpOnly refresh-token cookie, sent automatically by the browser.
+      description: HttpOnly web refresh-token cookie, sent automatically by the browser.
+    adminBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Admin-realm access token (signed with `ADMIN_JWT_SECRET`, `realm=admin`):
+        `Authorization: Bearer <admin access_token>`. A web-realm token is rejected
+        with 401 here, and vice versa.
+    adminRefreshCookie:
+      type: apiKey
+      in: cookie
+      name: admin_refresh_token
+      description: HttpOnly admin refresh-token cookie (scoped to Path=/api/v1/admin).
 
   parameters:
     Page:
@@ -783,6 +1058,13 @@ components:
       schema:
         type: string
       example: refresh_token=...; Path=/api/v1/auth; HttpOnly; Secure; SameSite=Strict
+    AdminRefreshCookie:
+      description: |
+        Sets (or rotates) the HttpOnly, Secure, SameSite=Strict `admin_refresh_token`
+        cookie, scoped to `Path=/api/v1/admin`.
+      schema:
+        type: string
+      example: admin_refresh_token=...; Path=/api/v1/admin; HttpOnly; Secure; SameSite=Strict
 
   responses:
     ValidationError:
@@ -806,12 +1088,16 @@ components:
             expired:
               value: { error: "invalid or expired token" }
     ForbiddenError:
-      description: Forbidden — the access token's active role is not admin.
+      description: |
+        Forbidden — the admin is authenticated but lacks the privilege this action
+        needs (today: super_admin, for managing admin accounts; reserved for finer
+        permission points later). "Not an admin" is a 401, not a 403, because a
+        non-admin token fails verification under the admin key.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
-          example: { error: "admin role required" }
+          example: { error: "super admin required" }
     NotFoundError:
       description: Not Found — the referenced resource does not exist.
       content:
@@ -833,14 +1119,6 @@ components:
       type: string
       description: A self-service role a user can register for or add.
       enum: [student, teacher]
-
-    ActiveRole:
-      type: string
-      description: |
-        Any role a token can be scoped to, including admin. admin is not in Role
-        because it is never self-acquired — it can only become the active role
-        via switch-role for an account that already holds it.
-      enum: [student, teacher, admin]
 
     CEFRLevel:
       type: string
@@ -956,13 +1234,12 @@ components:
     SwitchRoleRequest:
       type: object
       description: |
-        switch-role payload. role may also be admin here (unlike RoleRequest)
-        because switching only activates a role the caller already holds; it
-        cannot be used to acquire admin.
+        switch-role payload. Activates a role the caller already holds (student or
+        teacher). admin is not a web role, so it never appears here.
       required: [role]
       properties:
         role:
-          $ref: "#/components/schemas/ActiveRole"
+          $ref: "#/components/schemas/Role"
 
     AuthResponse:
       type: object
@@ -1045,9 +1322,14 @@ components:
       required: [user, active_role, onboarded]
 
     # ── Admin schemas ──────────────────────────────────────────────────
+    AdminLevel:
+      type: string
+      description: An admin account's privilege tier. super_admin additionally manages admin accounts.
+      enum: [admin, super_admin]
+
     AdminProfile:
       type: object
-      description: The signed-in admin's own identity (Phase A probe).
+      description: The signed-in admin's own identity (the back-office gate probe).
       properties:
         id:
           type: string
@@ -1058,17 +1340,123 @@ components:
         display_name:
           type: string
           example: Administrator
-        roles:
+        level:
+          $ref: "#/components/schemas/AdminLevel"
+      required: [id, phone, display_name, level]
+
+    Admin:
+      type: object
+      description: An admin account as managed by a super_admin.
+      properties:
+        id:
+          type: string
+          format: uuid
+        phone:
+          type: string
+          example: "13800138000"
+        email:
+          type: string
+          format: email
+          description: Omitted if not set.
+        display_name:
+          type: string
+          example: Administrator
+        level:
+          $ref: "#/components/schemas/AdminLevel"
+        status:
+          type: string
+          enum: [active, disabled]
+          example: active
+        created_at:
+          type: string
+          format: date-time
+      required: [id, phone, display_name, level, status, created_at]
+
+    AdminListResponse:
+      type: object
+      properties:
+        items:
           type: array
           items:
-            type: string
-          description: All roles the account holds (includes admin).
-          example: [admin]
-        active_role:
+            $ref: "#/components/schemas/Admin"
+        page:
+          $ref: "#/components/schemas/PageMeta"
+      required: [items, page]
+
+    AdminLoginRequest:
+      type: object
+      required: [identifier, password]
+      properties:
+        identifier:
           type: string
-          description: The role this access token is acting as.
-          example: admin
-      required: [id, phone, display_name, roles, active_role]
+          description: Admin phone or email.
+          example: "13800138000"
+        password:
+          type: string
+          example: s3cretpass
+
+    AdminAuthResponse:
+      type: object
+      description: Returned by admin login. The refresh token is NOT here — it is the admin_refresh_token cookie.
+      properties:
+        admin:
+          $ref: "#/components/schemas/Admin"
+        access_token:
+          type: string
+          example: "jwt..."
+        level:
+          $ref: "#/components/schemas/AdminLevel"
+        expires_in:
+          type: integer
+          format: int64
+          description: Access-token lifetime in seconds.
+          example: 900
+        refresh_token_expires_at:
+          type: integer
+          format: int64
+          description: Refresh-token expiry as a Unix timestamp (seconds).
+          example: 1719400000
+      required: [admin, access_token, level, expires_in, refresh_token_expires_at]
+
+    CreateAdminRequest:
+      type: object
+      description: Super-admin creates a new admin account.
+      required: [phone, password, display_name]
+      properties:
+        phone:
+          type: string
+          minLength: 5
+          maxLength: 20
+          example: "13800138000"
+        email:
+          type: string
+          format: email
+          description: Optional.
+          example: admin@example.com
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+          example: s3cretpass
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 50
+          example: Administrator
+        level:
+          allOf:
+            - $ref: "#/components/schemas/AdminLevel"
+          default: admin
+          description: Defaults to admin.
+
+    AdminStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [active, disabled]
+          description: A disabled admin cannot log in or refresh.
 
     PageMeta:
       type: object

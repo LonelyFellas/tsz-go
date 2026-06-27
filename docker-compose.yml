@@ -39,6 +39,9 @@ services:
       DATABASE_URL: "postgres://app:app@db:5432/tsz?sslmode=disable"
       JWT_SECRET: "change-me-use-a-long-random-string-in-production"
       JWT_TTL: "24h"
+      # Back-office (admin realm) signing key — MUST differ from JWT_SECRET.
+      ADMIN_JWT_SECRET: "change-me-a-DIFFERENT-long-random-string-for-admin"
+      ADMIN_JWT_TTL: "24h"
       APP_ENV: "production"
     ports:
       - "8080:8080"

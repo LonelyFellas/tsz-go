@@ -5,6 +5,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
+	"github.com/darwish/tsz-go/internal/admin"
 	"github.com/darwish/tsz-go/internal/auth"
 	"github.com/darwish/tsz-go/internal/user"
 )
@@ -16,6 +17,10 @@ const metricsPath = "/metrics"
 type Deps struct {
 	TokenManager *auth.TokenManager
 	UserHandler  *user.Handler
+	// AdminTokenManager verifies admin-realm tokens (separate signing key from
+	// TokenManager); AdminHandler serves the back-office identity endpoints.
+	AdminTokenManager *auth.TokenManager
+	AdminHandler      *admin.Handler
 	// OpenAPISpec is the raw OpenAPI document served at /docs/openapi.yaml and
 	// rendered by the Swagger UI at /docs. Docs are mounted only when EnableDocs
 	// is true and the spec is non-empty.
@@ -90,13 +95,36 @@ func NewRouter(deps Deps) *gin.Engine {
 			authed.POST("/auth/roles", deps.UserHandler.AddRole)
 		}
 
-		// Back-office routes, gated on the admin active role. AuthRequired runs
-		// first (401 for a missing/invalid token), then RequireRole (403 unless the
-		// token is acting as admin). Phase A exposes only the profile probe.
-		admin := v1.Group("/admin")
-		admin.Use(AuthRequired(deps.TokenManager), RequireRole(auth.RoleAdmin))
+		// Back office: a separate identity realm with its own token manager and
+		// signing key. The /admin/auth/* login subgroup is public (gated only by
+		// credentials / the admin refresh cookie) and throttled like web auth;
+		// everything else requires a valid admin token, and account management
+		// additionally requires super_admin.
+		adminGroup := v1.Group("/admin")
 		{
-			admin.GET("/profile", deps.UserHandler.AdminProfile)
+			adminAuth := adminGroup.Group("/auth")
+			if deps.AuthRateLimiter != nil {
+				adminAuth.Use(deps.AuthRateLimiter.Middleware())
+			}
+			adminAuth.POST("/login", deps.AdminHandler.Login)
+			adminAuth.POST("/refresh", deps.AdminHandler.Refresh)
+			adminAuth.POST("/logout", deps.AdminHandler.Logout)
+
+			authed := adminGroup.Group("")
+			authed.Use(AdminAuthRequired(deps.AdminTokenManager))
+			{
+				authed.POST("/auth/logout-all", deps.AdminHandler.LogoutAll)
+				authed.GET("/profile", deps.AdminHandler.Profile)
+
+				// Super-admin only: manage admin accounts.
+				admins := authed.Group("/admins")
+				admins.Use(RequireSuperAdmin())
+				{
+					admins.POST("", deps.AdminHandler.CreateAdmin)
+					admins.GET("", deps.AdminHandler.ListAdmins)
+					admins.PATCH("/:adminId/status", deps.AdminHandler.SetAdminStatus)
+				}
+			}
 		}
 	}
 
