@@ -310,6 +310,47 @@ Login with identifier + one-time code.
 
 ---
 
+#### `POST /api/v1/auth/password/forgot`
+Request a password-reset code, sent by **SMS** to the phone. Code lifetime: **5 minutes** (`OTP_CODE_TTL`). Pair with `/auth/password/reset`.
+
+> Always returns **200**, even for unknown phones — so it can't be used to probe which accounts exist. Do not treat 200 as proof the account exists.
+
+**Body**
+| Field | Type | Rules |
+|---|---|---|
+| `phone` | string | required. The account's phone number (5–20 chars). |
+
+**200**
+```json
+{ "status": "sent" }
+```
+**429** `too many code requests, try again later` — per-target rate limit hit (resend cooldown `OTP_RESEND_COOLDOWN`, or daily cap `OTP_DAILY_LIMIT`).
+
+---
+
+#### `POST /api/v1/auth/password/reset`
+Verify the reset code and set a new password. On success **every existing session is revoked** server-side, so the user must log in again with the new password.
+
+**Body**
+| Field | Type | Rules |
+|---|---|---|
+| `phone` | string | required. The phone the code was sent to. |
+| `code` | string | required. The code from `password/forgot`. |
+| `new_password` | string | required. 8–72 chars (bcrypt caps input at 72 bytes). |
+
+```json
+{ "phone": "13800138000", "code": "123456", "new_password": "newpassword456" }
+```
+
+**200**
+```json
+{ "status": "reset" }
+```
+**400** validation error, or `invalid or expired reset code` — wrong/expired code (also returned for an unknown phone, to avoid account probing).
+**403** `account disabled` — the account is disabled and cannot be reset into.
+
+---
+
 #### `POST /api/v1/auth/refresh`
 Exchange the refresh-token cookie for a new access token + **rotated** refresh token.
 

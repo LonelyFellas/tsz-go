@@ -114,6 +114,22 @@ func (r *Repository) SetStatus(ctx context.Context, userID uuid.UUID, s UserStat
 	return nil
 }
 
+// SetPassword overwrites a user's password hash (used by the forgot-password
+// flow once a reset code has been verified). Returns ErrNotFound if no user has
+// the given ID, so a caller acting on a stale ID gets a definite signal.
+func (r *Repository) SetPassword(ctx context.Context, userID uuid.UUID, passwordHash string) error {
+	ct, err := r.db.Exec(ctx,
+		`UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1`,
+		userID, passwordHash)
+	if err != nil {
+		return fmt.Errorf("set password: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // addRoleTx inserts the role membership and its role-specific profile row within
 // an existing transaction.
 func addRoleTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, role Role) error {

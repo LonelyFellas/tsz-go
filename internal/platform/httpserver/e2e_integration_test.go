@@ -333,3 +333,55 @@ func TestE2E_RegisterLoginMe(t *testing.T) {
 		t.Fatalf("bad-login status = %d, want 401", w.Code)
 	}
 }
+
+// TestE2E_PasswordReset drives the forgot-password flow end to end against the
+// real DB. It is also the only test that exercises migration 000012: persisting
+// a code with purpose 'password_reset' must not violate the verification_codes
+// CHECK constraint (the in-memory fake does not enforce it, so unit tests can't
+// catch a missing/incorrect migration here).
+func TestE2E_PasswordReset(t *testing.T) {
+	r, sender := buildRealRouter(t)
+	email := "e2e-" + uuid.NewString() + "@example.com"
+	phone := fmt.Sprintf("1%010d", time.Now().UnixNano()%1e10)
+
+	// register, then log in to get a session we can later prove the reset revoked
+	body := `{"phone":"` + phone + `","email":"` + email + `","password":"password123","display_name":"PR","role":"student"}`
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/register", body, ""); w.Code != http.StatusCreated {
+		t.Fatalf("register status = %d, body=%s", w.Code, w.Body)
+	}
+	_, refresh := loginTokens(t, r, phone, "password123")
+
+	// request a reset code (always 200), read it from the mock sender
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/password/forgot", `{"phone":"`+phone+`"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("forgot status = %d, body=%s", w.Code, w.Body)
+	}
+	code := sender.LastCode(phone)
+	if code == "" {
+		t.Fatal("mock sender did not capture a reset code")
+	}
+
+	// reset with the code → 200
+	resetBody := `{"phone":"` + phone + `","code":"` + code + `","new_password":"newpassword456"}`
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/password/reset", resetBody, ""); w.Code != http.StatusOK {
+		t.Fatalf("reset status = %d, body=%s", w.Code, w.Body)
+	}
+
+	// the reset revoked all prior sessions: the pre-reset refresh token is dead.
+	// Checked before any new login, so it proves the reset (not a later login) did it.
+	if w := reqCookie(t, r, http.MethodPost, "/api/v1/auth/refresh", "", refresh); w.Code != http.StatusUnauthorized {
+		t.Fatalf("pre-reset refresh status = %d, want 401", w.Code)
+	}
+
+	// old password no longer works; the new one does
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login", `{"identifier":"`+phone+`","password":"password123"}`, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("login with old password status = %d, want 401", w.Code)
+	}
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login", `{"identifier":"`+phone+`","password":"newpassword456"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("login with new password status = %d, want 200, body=%s", w.Code, w.Body)
+	}
+
+	// the reset code is single-use: replaying it → 400
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/password/reset", resetBody, ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("replayed reset code status = %d, want 400", w.Code)
+	}
+}

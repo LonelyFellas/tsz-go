@@ -22,10 +22,20 @@ var (
 	// refresh. It is distinct from ErrInvalidCredentials (the credentials are
 	// valid; the account is locked) so the handler can surface a 403.
 	ErrAccountDisabled = errors.New("account disabled")
+	// ErrInvalidResetCode is returned by ResetPassword when the submitted reset
+	// code is wrong, expired, already used, or never issued. It is deliberately
+	// undifferentiated (and also covers "no account for this phone") so the flow
+	// never reveals which phone numbers are registered.
+	ErrInvalidResetCode = errors.New("invalid or expired reset code")
 )
 
-// codePurposeLogin is the verification-code purpose for code-based login.
-const codePurposeLogin = "login"
+// Verification-code purposes. Each value is also constrained in the
+// verification_codes.purpose CHECK (see the migrations), so adding one here
+// means adding it there too.
+const (
+	codePurposeLogin         = "login"
+	codePurposePasswordReset = "password_reset"
+)
 
 // Store is the persistence behavior the Service depends on. Defining it as an
 // interface lets the service be unit-tested with an in-memory fake, while the
@@ -40,6 +50,7 @@ type Store interface {
 	SetActiveRole(ctx context.Context, userID uuid.UUID, role Role) error
 	GetLearningSettings(ctx context.Context, userID uuid.UUID) (*LearningSettings, error)
 	SetLearningSettings(ctx context.Context, userID uuid.UUID, s *LearningSettings) error
+	SetPassword(ctx context.Context, userID uuid.UUID, passwordHash string) error
 }
 
 // Codes is the verification-code behavior the Service depends on for code-based
@@ -154,6 +165,57 @@ func (s *Service) LoginCode(ctx context.Context, identifier, code string) (*User
 	}
 
 	return s.issue(ctx, u)
+}
+
+// RequestPasswordReset sends a one-time reset code over SMS to the given phone.
+// Like RequestLoginCode it does not check whether the phone is registered, so it
+// cannot be used to probe which accounts exist; an unregistered phone simply
+// receives a code that will never resolve to an account at ResetPassword time.
+func (s *Service) RequestPasswordReset(ctx context.Context, phone string) error {
+	return s.codes.RequestCode(ctx, normalizePhone(phone), codePurposePasswordReset)
+}
+
+// ResetPassword completes the forgot-password flow: it verifies the reset code
+// previously sent to the phone, then sets a new password and revokes every
+// existing session so any attacker holding old tokens is locked out. A wrong/
+// expired code OR an unregistered phone both surface as ErrInvalidResetCode, so
+// the flow never reveals which numbers are registered. A disabled account is
+// rejected after the code check (mirroring code login) and cannot reset its way
+// back in.
+func (s *Service) ResetPassword(ctx context.Context, phone, code, newPassword string) error {
+	target := normalizePhone(phone)
+
+	if err := s.codes.Verify(ctx, target, codePurposePasswordReset, code); err != nil {
+		return ErrInvalidResetCode
+	}
+
+	u, err := s.repo.GetByPhone(ctx, target)
+	if errors.Is(err, ErrNotFound) {
+		// Valid code but no account: the code was just consumed, so this can't be
+		// replayed. Stay generic so existence isn't leaked.
+		return ErrInvalidResetCode
+	}
+	if err != nil {
+		return err
+	}
+	if u.Status == StatusDisabled {
+		return ErrAccountDisabled
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	if err := s.repo.SetPassword(ctx, u.ID, string(hash)); err != nil {
+		return err
+	}
+
+	// Invalidate all outstanding sessions: a password reset should sign the user
+	// out everywhere, including any device an attacker may have been using.
+	if err := s.sessions.RevokeAll(ctx, u.ID); err != nil {
+		return fmt.Errorf("revoke sessions: %w", err)
+	}
+	return nil
 }
 
 // Refresh rotates a refresh token and mints a fresh access token for its owner.

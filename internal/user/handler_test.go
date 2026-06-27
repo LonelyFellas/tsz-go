@@ -259,6 +259,63 @@ func TestHandler_SendCode_RateLimited(t *testing.T) {
 	}
 }
 
+func TestHandler_ForgotAndResetPassword(t *testing.T) {
+	h, _, _, _, _ := newTestHandler()
+	// seed a user via Register
+	_ = doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
+
+	// forgot is always 200, even for an unknown phone (no account probing)
+	if w := doJSON(t, h.ForgotPassword, `{"phone":"13800138000"}`); w.Code != http.StatusOK {
+		t.Fatalf("forgot status = %d, want 200 (body: %s)", w.Code, w.Body)
+	}
+	if w := doJSON(t, h.ForgotPassword, `{"phone":"19999999999"}`); w.Code != http.StatusOK {
+		t.Fatalf("forgot unknown status = %d, want 200", w.Code)
+	}
+	if w := doJSON(t, h.ForgotPassword, `{}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("forgot missing phone status = %d, want 400", w.Code)
+	}
+
+	// the fake issues "123456"; resetting with it succeeds
+	if w := doJSON(t, h.ResetPassword, `{"phone":"13800138000","code":"123456","new_password":"newpassword456"}`); w.Code != http.StatusOK {
+		t.Fatalf("reset status = %d, want 200 (body: %s)", w.Code, w.Body)
+	}
+	// the new password now logs in, the old one does not
+	if w := doJSON(t, h.Login, `{"identifier":"13800138000","password":"newpassword456"}`); w.Code != http.StatusOK {
+		t.Fatalf("login with new password status = %d, want 200 (body: %s)", w.Code, w.Body)
+	}
+	if w := doJSON(t, h.Login, `{"identifier":"13800138000","password":"password123"}`); w.Code != http.StatusUnauthorized {
+		t.Fatalf("login with old password status = %d, want 401", w.Code)
+	}
+}
+
+func TestHandler_ResetPassword_Errors(t *testing.T) {
+	h, _, _, _, _ := newTestHandler()
+	_ = doJSON(t, h.Register, `{"phone":"13800138000","email":"re@b.com","password":"password123","display_name":"RE","role":"student"}`)
+	_ = doJSON(t, h.ForgotPassword, `{"phone":"13800138000"}`)
+
+	// wrong code → 400
+	if w := doJSON(t, h.ResetPassword, `{"phone":"13800138000","code":"000000","new_password":"newpassword456"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("wrong-code status = %d, want 400 (body: %s)", w.Code, w.Body)
+	}
+	// short new password → 400 (binding)
+	if w := doJSON(t, h.ResetPassword, `{"phone":"13800138000","code":"123456","new_password":"short"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("short-password status = %d, want 400", w.Code)
+	}
+	// missing code → 400 (binding)
+	if w := doJSON(t, h.ResetPassword, `{"phone":"13800138000","new_password":"newpassword456"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing-code status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandler_ForgotPassword_RateLimited(t *testing.T) {
+	h, _, codes, _, _ := newTestHandler()
+	codes.reqFn = func(string, string) error { return otp.ErrRateLimited }
+
+	if w := doJSON(t, h.ForgotPassword, `{"phone":"13800138000"}`); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("forgot status = %d, want 429 (body: %s)", w.Code, w.Body)
+	}
+}
+
 // registerAndGetRefresh seeds a user via Register and returns the refresh token
 // from the response cookie.
 func registerAndGetRefresh(t *testing.T, h *Handler) string {
