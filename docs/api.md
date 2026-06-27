@@ -14,6 +14,8 @@ The API uses **JWT access tokens** + **refresh tokens**, stored differently by d
 - **Access token** — returned in the JSON body. Lifetime **15 minutes** (default, `JWT_TTL`). Carries the user ID and active role. Send it on protected endpoints via the header `Authorization: Bearer <access_token>`. Keep it in memory, not `localStorage`.
 - **Refresh token** — delivered as an **HttpOnly, Secure, SameSite=Strict cookie** (scoped to `Path=/api/v1/auth`), **not in the body**. Lifetime **30 days** (default, `REFRESH_TOKEN_TTL`). The browser sends it automatically to `/auth/refresh` and `/auth/logout`; frontend JS never reads or stores it. Make requests with credentials (`withCredentials: true` / `credentials: 'include'`).
 
+> **Two independent identity realms.** Everything above is the **web** realm (students/teachers). The **admin** back office is a *separate* identity store (`admins` table) with its **own** login (`/api/v1/admin/auth/*`), its own signing key (`ADMIN_JWT_SECRET`), and its own refresh cookie (`admin_refresh_token`, scoped to `Path=/api/v1/admin`). A web token can never pass an admin endpoint and an admin token can never pass a web endpoint — they fail signature verification under the other realm's key, so the boundary is enforced by the key itself, not just a role check. See [user-module-design.md](user-module-design.md) for the full model and the admin section below for the contract.
+
 > **Why a cookie?** A refresh token is the long-lived "master key". HttpOnly keeps JS (and thus XSS) from ever reading it; SameSite=Strict + the narrow path defend against CSRF. The short-lived access token stays in memory, so an XSS at worst grabs a token that expires in ≤15 min.
 
 ### Single-device login
@@ -431,17 +433,38 @@ Acquire an additional identity (e.g. a student who also starts teaching), then s
 ### Admin (back office)
 
 The `/api/v1/admin/*` endpoints back the management console (dashboard, user
-administration, moderation, Tiansheng-coin, audit). They share the same
-authentication as the rest of the API **plus a role gate**:
+administration, moderation, Tiansheng-coin, audit). Admin is a **separate identity
+realm** (`admins` table), not a role on a web account — see the realm note under
+[Authentication](#authentication) and [user-module-design.md](user-module-design.md).
 
-- The access token must be **acting as the `admin` role** (it travels in the
-  token, so a multi-role account switches in via `/auth/switch-role` first).
-- Missing/expired token → **401**, same as any authenticated endpoint.
-- Authenticated but not admin → **403** `admin role required`.
+**Logging in is its own flow:**
+
+- `POST /api/v1/admin/auth/login` (identifier + password) → an **admin-realm**
+  access token (signed with `ADMIN_JWT_SECRET`) + an `admin_refresh_token` cookie
+  (scoped to `Path=/api/v1/admin`). Password only — no SMS-code login for admin.
+- `POST /api/v1/admin/auth/refresh` / `/logout` / `/logout-all` mirror the web ones,
+  but on the admin cookie.
+- Admin is **not self-registerable**. The first **super_admin** is seeded out of band
+  (`make seed`); further admins are created by a super_admin via
+  `POST /api/v1/admin/admins`.
+
+**Gate semantics:**
+
+- Missing/invalid/expired token, **or a web-realm token** → **401** `invalid or
+  expired token` (a web token fails verification under the admin key — there is no
+  "wrong realm 403", it simply isn't a valid admin token).
+- Authenticated admin but the action needs **super_admin** (create/disable admin
+  accounts) → **403** `super admin required`.
+- Disabling the **last active `super_admin`** (self-disable included) → **409**
+  `cannot disable the last active super admin` — the back office can never be
+  left with no one able to manage accounts.
 
 ```
-Authorization: Bearer <access_token acting as admin>
+Authorization: Bearer <admin-realm access_token>
 ```
+
+The admin's own identity probe is `GET /api/v1/admin/profile` →
+`{ id, phone, display_name, level }` (`level` is `admin` or `super_admin`).
 
 Beyond auth, these endpoints differ from the teacher-facing API in two ways:
 

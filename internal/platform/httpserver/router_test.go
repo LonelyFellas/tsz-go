@@ -15,7 +15,7 @@ import (
 // and the auth middleware) because none of them reach into the service.
 func newTestRouter() http.Handler {
 	return NewRouter(Deps{
-		TokenManager: auth.NewTokenManager("secret", time.Hour),
+		TokenManager: auth.NewTokenManager("secret", time.Hour, auth.RealmWeb),
 		UserHandler:  user.NewHandler(nil, user.CookieConfig{}, 15*time.Minute, 720*time.Hour),
 	})
 }
@@ -23,7 +23,7 @@ func newTestRouter() http.Handler {
 // /readyz and /metrics must be mounted when their deps are supplied.
 func TestRouter_ObservabilityEndpoints(t *testing.T) {
 	router := NewRouter(Deps{
-		TokenManager: auth.NewTokenManager("secret", time.Hour),
+		TokenManager: auth.NewTokenManager("secret", time.Hour, auth.RealmWeb),
 		UserHandler:  user.NewHandler(nil, user.CookieConfig{}, 15*time.Minute, 720*time.Hour),
 		DB:           fakePinger{},
 		Metrics:      NewMetrics(),
@@ -76,7 +76,7 @@ func TestRouter_UnknownRoute(t *testing.T) {
 // proves it's scoped to the auth group and not applied globally.
 func TestRouter_RateLimiterScopedToAuth(t *testing.T) {
 	router := NewRouter(Deps{
-		TokenManager:    auth.NewTokenManager("secret", time.Hour),
+		TokenManager:    auth.NewTokenManager("secret", time.Hour, auth.RealmWeb),
 		UserHandler:     user.NewHandler(nil, user.CookieConfig{}, 15*time.Minute, 720*time.Hour),
 		AuthRateLimiter: NewIPRateLimiter(60, 0, time.Minute),
 	})

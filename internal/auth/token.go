@@ -10,53 +10,72 @@ import (
 	"github.com/google/uuid"
 )
 
-// Context keys under which the authenticated user's ID and active role are
-// stored on the gin context. They live here so both the middleware and the
-// domain handlers can reference them without creating an import cycle.
+// Context keys under which the authenticated principal is stored on the gin
+// context. They live here so both the middleware and the domain handlers can
+// reference them without creating an import cycle.
+//
+// Web and admin are separate identity realms, so their principals are stored
+// under separate keys — a handler can never accidentally read an admin id where
+// it expected a web user id.
 const (
 	ContextUserIDKey = "auth.userID"
 	ContextRoleKey   = "auth.role"
+	// ContextAdminIDKey and ContextAdminLevelKey hold the authenticated admin's
+	// id and level (admin/super_admin), populated by the admin gate.
+	ContextAdminIDKey    = "auth.adminID"
+	ContextAdminLevelKey = "auth.adminLevel"
 )
 
-// RoleAdmin is the active-role value that the admin gate checks for. It is
-// duplicated here (as a plain string) so the httpserver middleware can gate on it
-// without importing the user package — which would create an import cycle, since
-// user depends on auth. The user package owns the canonical user.RoleAdmin; this
-// constant must stay in sync with it.
-const RoleAdmin = "admin"
+// Token realms. A token is bound to exactly one realm and is signed with that
+// realm's key; Parse rejects a token whose realm does not match the manager's.
+// This is what keeps a web token off the admin API and vice versa — the boundary
+// is enforced by the signing key first and re-checked by the realm claim.
+const (
+	RealmWeb   = "web"
+	RealmAdmin = "admin"
+)
 
-// Claims is what a parsed token decodes to: who the user is, and which role
-// they are currently acting as ("active role"). A user may hold several roles;
-// switching role re-issues a token with a different Role.
+// Claims is what a parsed token decodes to: who the principal is, the realm the
+// token belongs to, and a realm-specific role/level string ("active role" for
+// web, level for admin).
 type Claims struct {
-	UserID uuid.UUID
-	Role   string
+	Subject uuid.UUID
+	Realm   string
+	Role    string
 }
 
 // tokenClaims is the on-the-wire JWT payload: the registered claims plus our
-// custom active-role claim.
+// custom realm and role claims.
 type tokenClaims struct {
-	Role string `json:"role"`
+	Realm string `json:"realm"`
+	Role  string `json:"role"`
 	jwt.RegisteredClaims
 }
 
+// TokenManager signs and verifies access tokens for a single realm. Construct
+// one per realm (web, admin) with that realm's own secret, so a token signed by
+// one manager fails verification under the other.
 type TokenManager struct {
 	secret []byte
 	ttl    time.Duration
+	realm  string
 }
 
-func NewTokenManager(secret string, ttl time.Duration) *TokenManager {
-	return &TokenManager{secret: []byte(secret), ttl: ttl}
+// NewTokenManager builds a token manager bound to a realm. secret must differ
+// between realms for the cross-realm rejection to hold.
+func NewTokenManager(secret string, ttl time.Duration, realm string) *TokenManager {
+	return &TokenManager{secret: []byte(secret), ttl: ttl, realm: realm}
 }
 
-// Generate issues a signed HS256 token whose subject is the user ID and which
-// carries the active role.
-func (m *TokenManager) Generate(userID uuid.UUID, role string) (string, error) {
+// Generate issues a signed HS256 token whose subject is the principal ID and
+// which carries this manager's realm plus the given role/level.
+func (m *TokenManager) Generate(subject uuid.UUID, role string) (string, error) {
 	now := time.Now()
 	claims := tokenClaims{
-		Role: role,
+		Realm: m.realm,
+		Role:  role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID.String(),
+			Subject:   subject.String(),
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(m.ttl)),
 		},
@@ -65,7 +84,9 @@ func (m *TokenManager) Generate(userID uuid.UUID, role string) (string, error) {
 	return token.SignedString(m.secret)
 }
 
-// Parse validates a token and returns the user ID and active role it encodes.
+// Parse validates a token and returns its claims. It rejects a token whose realm
+// claim does not match this manager's realm (defence in depth on top of the
+// per-realm signing key).
 func (m *TokenManager) Parse(tokenString string) (Claims, error) {
 	claims := &tokenClaims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (any, error) {
@@ -77,10 +98,13 @@ func (m *TokenManager) Parse(tokenString string) (Claims, error) {
 	if err != nil || !token.Valid {
 		return Claims{}, fmt.Errorf("invalid token: %w", err)
 	}
+	if claims.Realm != m.realm {
+		return Claims{}, fmt.Errorf("token realm %q does not match %q", claims.Realm, m.realm)
+	}
 
 	id, err := uuid.Parse(claims.Subject)
 	if err != nil {
 		return Claims{}, fmt.Errorf("invalid token subject: %w", err)
 	}
-	return Claims{UserID: id, Role: claims.Role}, nil
+	return Claims{Subject: id, Realm: claims.Realm, Role: claims.Role}, nil
 }

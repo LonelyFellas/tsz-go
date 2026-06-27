@@ -5,12 +5,14 @@ import (
 	"time"
 )
 
-// setRequired sets the two mandatory vars so individual tests can focus on the
-// field under test. t.Setenv auto-restores after the test.
+// setRequired sets the mandatory vars so individual tests can focus on the field
+// under test. ADMIN_JWT_SECRET must differ from JWT_SECRET (realm isolation).
+// t.Setenv auto-restores after the test.
 func setRequired(t *testing.T) {
 	t.Helper()
 	t.Setenv("DATABASE_URL", "postgres://app:app@localhost:5432/tsz")
 	t.Setenv("JWT_SECRET", "a-secret")
+	t.Setenv("ADMIN_JWT_SECRET", "a-different-admin-secret")
 }
 
 func TestLoad_Success(t *testing.T) {
@@ -53,6 +55,12 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.RefreshTokenTTL != 720*time.Hour {
 		t.Errorf("RefreshTokenTTL default = %v, want 720h", cfg.RefreshTokenTTL)
+	}
+	if cfg.AdminJWTTTL != 15*time.Minute {
+		t.Errorf("AdminJWTTTL default = %v, want 15m", cfg.AdminJWTTTL)
+	}
+	if cfg.AdminRefreshTokenTTL != 720*time.Hour {
+		t.Errorf("AdminRefreshTokenTTL default = %v, want 720h", cfg.AdminRefreshTokenTTL)
 	}
 	if cfg.Env != "development" {
 		t.Errorf("Env default = %q, want development", cfg.Env)
@@ -102,5 +110,26 @@ func TestLoad_MissingJWTSecret(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error when JWT_SECRET is missing")
+	}
+}
+
+func TestLoad_MissingAdminJWTSecret(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("JWT_SECRET", "a-secret")
+	t.Setenv("ADMIN_JWT_SECRET", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when ADMIN_JWT_SECRET is missing")
+	}
+}
+
+// The two signing keys must differ, or a web token could verify on the admin API.
+func TestLoad_AdminSecretMustDifferFromWeb(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("JWT_SECRET", "same-secret")
+	t.Setenv("ADMIN_JWT_SECRET", "same-secret")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when ADMIN_JWT_SECRET equals JWT_SECRET")
 	}
 }

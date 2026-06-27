@@ -14,7 +14,7 @@ import (
 
 func newDocsRouter(spec []byte, enable bool) http.Handler {
 	return NewRouter(Deps{
-		TokenManager: auth.NewTokenManager("secret", time.Hour),
+		TokenManager: auth.NewTokenManager("secret", time.Hour, auth.RealmWeb),
 		UserHandler:  user.NewHandler(nil, user.CookieConfig{}, 15*time.Minute, 720*time.Hour),
 		OpenAPISpec:  spec,
 		EnableDocs:   enable,

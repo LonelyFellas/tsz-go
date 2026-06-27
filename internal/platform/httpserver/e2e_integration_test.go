@@ -43,7 +43,7 @@ func buildRealRouter(t *testing.T) (http.Handler, *otp.MockSender) {
 	}
 	t.Cleanup(pool.Close)
 
-	tm := auth.NewTokenManager("e2e-secret", time.Hour)
+	tm := auth.NewTokenManager("e2e-secret", time.Hour, auth.RealmWeb)
 	sender := otp.NewMockSender()
 	otpSvc := otp.NewService(otp.NewRepository(pool), sender, time.Minute, 0, 0) // rate limiting off; tested in otp unit tests
 	sessionSvc := session.NewService(session.NewRepository(pool), time.Hour)

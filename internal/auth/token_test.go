@@ -9,7 +9,7 @@ import (
 )
 
 func TestTokenRoundTrip(t *testing.T) {
-	tm := NewTokenManager("test-secret", time.Hour)
+	tm := NewTokenManager("test-secret", time.Hour, RealmWeb)
 	id := uuid.New()
 
 	tok, err := tm.Generate(id, "student")
@@ -21,16 +21,19 @@ func TestTokenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if got.UserID != id {
-		t.Fatalf("got %s, want %s", got.UserID, id)
+	if got.Subject != id {
+		t.Fatalf("got %s, want %s", got.Subject, id)
 	}
 	if got.Role != "student" {
 		t.Fatalf("role = %q, want student", got.Role)
 	}
+	if got.Realm != RealmWeb {
+		t.Fatalf("realm = %q, want %q", got.Realm, RealmWeb)
+	}
 }
 
 func TestParseRejectsExpired(t *testing.T) {
-	tm := NewTokenManager("test-secret", -time.Minute) // already expired
+	tm := NewTokenManager("test-secret", -time.Minute, RealmWeb) // already expired
 	tok, err := tm.Generate(uuid.New(), "student")
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -41,8 +44,8 @@ func TestParseRejectsExpired(t *testing.T) {
 }
 
 func TestParseRejectsWrongSecret(t *testing.T) {
-	signer := NewTokenManager("secret-a", time.Hour)
-	verifier := NewTokenManager("secret-b", time.Hour)
+	signer := NewTokenManager("secret-a", time.Hour, RealmWeb)
+	verifier := NewTokenManager("secret-b", time.Hour, RealmWeb)
 
 	tok, _ := signer.Generate(uuid.New(), "student")
 	if _, err := verifier.Parse(tok); err == nil {
@@ -50,8 +53,20 @@ func TestParseRejectsWrongSecret(t *testing.T) {
 	}
 }
 
+// A token minted for one realm must be rejected by another realm's manager, even
+// when (hypothetically) the secret matched — the realm claim is checked too.
+func TestParseRejectsWrongRealm(t *testing.T) {
+	web := NewTokenManager("same-secret", time.Hour, RealmWeb)
+	adminTM := NewTokenManager("same-secret", time.Hour, RealmAdmin)
+
+	tok, _ := web.Generate(uuid.New(), "student")
+	if _, err := adminTM.Parse(tok); err == nil {
+		t.Fatal("expected a web-realm token to be rejected by the admin manager")
+	}
+}
+
 func TestParseRejectsMalformed(t *testing.T) {
-	tm := NewTokenManager("secret", time.Hour)
+	tm := NewTokenManager("secret", time.Hour, RealmWeb)
 	for _, tok := range []string{"", "abc", "a.b.c", "....", "Bearer xyz"} {
 		if _, err := tm.Parse(tok); err == nil {
 			t.Errorf("expected %q to be rejected", tok)
@@ -62,7 +77,7 @@ func TestParseRejectsMalformed(t *testing.T) {
 // A token using the "none" algorithm must never be accepted — this is the
 // classic JWT downgrade attack.
 func TestParseRejectsNoneAlg(t *testing.T) {
-	tm := NewTokenManager("secret", time.Hour)
+	tm := NewTokenManager("secret", time.Hour, RealmWeb)
 	claims := jwt.RegisteredClaims{
 		Subject:   uuid.New().String(),
 		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
@@ -77,12 +92,16 @@ func TestParseRejectsNoneAlg(t *testing.T) {
 	}
 }
 
-// A subject that is not a valid UUID must be rejected even if well-signed.
+// A subject that is not a valid UUID must be rejected even if well-signed. The
+// token carries the right realm so parsing reaches the subject check.
 func TestParseRejectsBadSubject(t *testing.T) {
-	tm := NewTokenManager("secret", time.Hour)
-	claims := jwt.RegisteredClaims{
-		Subject:   "not-a-uuid",
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	tm := NewTokenManager("secret", time.Hour, RealmWeb)
+	claims := tokenClaims{
+		Realm: RealmWeb,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   "not-a-uuid",
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
 	}
 	signed, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("secret"))
 	if _, err := tm.Parse(signed); err == nil {

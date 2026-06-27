@@ -18,7 +18,7 @@ func newTestService() (*Service, *fakeStore, *fakeCodes, *fakeSessions) {
 	store := newFakeStore()
 	codes := newFakeCodes()
 	sessions := newFakeSessions()
-	tm := auth.NewTokenManager("test-secret", time.Hour)
+	tm := auth.NewTokenManager("test-secret", time.Hour, auth.RealmWeb)
 	return NewService(store, tm, codes, sessions), store, codes, sessions
 }
 
@@ -53,8 +53,8 @@ func TestService_Register_Success(t *testing.T) {
 	}
 	// a valid access token referencing this user and role is returned
 	claims, err := svc.token.Parse(access)
-	if err != nil || claims.UserID != u.ID {
-		t.Errorf("token did not parse back to user id: id=%s err=%v", claims.UserID, err)
+	if err != nil || claims.Subject != u.ID {
+		t.Errorf("token did not parse back to user id: id=%s err=%v", claims.Subject, err)
 	}
 	if claims.Role != string(RoleStudent) {
 		t.Errorf("token role = %q, want student", claims.Role)
@@ -288,8 +288,8 @@ func TestService_Refresh_RotatesAndReSignsAccess(t *testing.T) {
 	}
 	// the new access token is valid and scoped to the user
 	claims, err := svc.token.Parse(access)
-	if err != nil || claims.UserID != reg.ID {
-		t.Errorf("refreshed access invalid: id=%s err=%v", claims.UserID, err)
+	if err != nil || claims.Subject != reg.ID {
+		t.Errorf("refreshed access invalid: id=%s err=%v", claims.Subject, err)
 	}
 	if rotated == "" || rotated == refresh {
 		t.Error("refresh must rotate the refresh token")
@@ -388,71 +388,6 @@ func TestService_Refresh_Disabled(t *testing.T) {
 	}
 }
 
-// SeedAdmin is idempotent: creating a fresh admin, then re-running with the same
-// phone, leaves exactly one account that holds the admin role.
-func TestService_SeedAdmin_Idempotent(t *testing.T) {
-	svc, store, _, _ := newTestService()
-	ctx := context.Background()
-
-	first, err := svc.SeedAdmin(ctx, " 13800138000 ", "adminpass123", "Administrator")
-	if err != nil {
-		t.Fatalf("first seed: %v", err)
-	}
-	if first.Phone != "13800138000" {
-		t.Errorf("phone = %q, want trimmed", first.Phone)
-	}
-	if !hasRole(first.Roles, RoleAdmin) {
-		t.Errorf("roles = %v, want to include admin", first.Roles)
-	}
-
-	second, err := svc.SeedAdmin(ctx, "13800138000", "adminpass123", "Administrator")
-	if err != nil {
-		t.Fatalf("second seed: %v", err)
-	}
-	if second.ID != first.ID {
-		t.Errorf("second seed created a new account: %s != %s", second.ID, first.ID)
-	}
-	if len(store.byID) != 1 {
-		t.Errorf("account count = %d, want 1", len(store.byID))
-	}
-}
-
-// SeedAdmin on an existing non-admin account grants the admin role rather than
-// creating a duplicate, and leaves the original password intact.
-func TestService_SeedAdmin_PromotesExisting(t *testing.T) {
-	svc, store, _, _ := newTestService()
-	ctx := context.Background()
-
-	reg, _, _, _ := svc.Register(ctx, "13800138000", "p@example.com", "password123", "P", RoleStudent)
-
-	promoted, err := svc.SeedAdmin(ctx, "13800138000", "ignored-password", "Administrator")
-	if err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if promoted.ID != reg.ID {
-		t.Errorf("seed created a new account instead of promoting: %s != %s", promoted.ID, reg.ID)
-	}
-	if !hasRole(promoted.Roles, RoleAdmin) || !hasRole(promoted.Roles, RoleStudent) {
-		t.Errorf("roles = %v, want both student and admin", promoted.Roles)
-	}
-	if len(store.byID) != 1 {
-		t.Errorf("account count = %d, want 1", len(store.byID))
-	}
-	// the existing password is untouched — the seed password is only used on create.
-	if err := bcrypt.CompareHashAndPassword([]byte(store.byID[reg.ID].PasswordHash), []byte("password123")); err != nil {
-		t.Errorf("existing password was overwritten by seed: %v", err)
-	}
-}
-
-func hasRole(roles []Role, want Role) bool {
-	for _, r := range roles {
-		if r == want {
-			return true
-		}
-	}
-	return false
-}
-
 func TestService_Logout_RevokesRefresh(t *testing.T) {
 	svc, _, _, _ := newTestService()
 	ctx := context.Background()
@@ -543,7 +478,7 @@ func TestRole_Valid(t *testing.T) {
 	cases := map[Role]bool{
 		RoleStudent:     true,
 		RoleTeacher:     true,
-		RoleAdmin:       true, // admin is a valid role (the admin gate checks it)
+		Role("admin"):   false, // admin is a separate identity realm, not a web role
 		Role(""):        false,
 		Role("Student"): false, // case-sensitive
 	}
