@@ -398,7 +398,9 @@ Re-issue an access token scoped to a role the user **already holds**. Returns on
 **Body**
 | Field | Type | Rules |
 |---|---|---|
-| `role` | string | required, `student` or `teacher`. |
+| `role` | string | required, `student`, `teacher`, or `admin`. |
+
+`admin` is accepted here (unlike `add-role`) because switching only ever activates a role the account already owns — it is gated on `HasRole`, so it cannot be used to acquire admin. A multi-role account enters the back office by switching its active role to `admin`.
 
 **200**
 ```json
@@ -415,7 +417,7 @@ Acquire an additional identity (e.g. a student who also starts teaching), then s
 **Body**
 | Field | Type | Rules |
 |---|---|---|
-| `role` | string | required, `student` or `teacher`. |
+| `role` | string | required, `student` or `teacher`. `admin` is **not** accepted — admin is never self-granted (it is provisioned out of band), so allowing it here would be a privilege-escalation hole. |
 
 **201**
 ```json

@@ -357,7 +357,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/RoleRequest"
+              $ref: "#/components/schemas/SwitchRoleRequest"
       responses:
         "200":
           description: OK
@@ -831,7 +831,16 @@ components:
 
     Role:
       type: string
+      description: A self-service role a user can register for or add.
       enum: [student, teacher]
+
+    ActiveRole:
+      type: string
+      description: |
+        Any role a token can be scoped to, including admin. admin is not in Role
+        because it is never self-acquired — it can only become the active role
+        via switch-role for an account that already holds it.
+      enum: [student, teacher, admin]
 
     CEFRLevel:
       type: string
@@ -934,10 +943,26 @@ components:
 
     RoleRequest:
       type: object
+      description: |
+        add-role payload. role is restricted to the self-service roles
+        (student, teacher); admin is intentionally not accepted, since this
+        endpoint grants the caller the role on themselves and admin is only ever
+        provisioned out of band.
       required: [role]
       properties:
         role:
           $ref: "#/components/schemas/Role"
+
+    SwitchRoleRequest:
+      type: object
+      description: |
+        switch-role payload. role may also be admin here (unlike RoleRequest)
+        because switching only activates a role the caller already holds; it
+        cannot be used to acquire admin.
+      required: [role]
+      properties:
+        role:
+          $ref: "#/components/schemas/ActiveRole"
 
     AuthResponse:
       type: object
