@@ -2,6 +2,8 @@
 package httpserver
 
 import (
+	"log/slog"
+
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
@@ -35,10 +37,24 @@ type Deps struct {
 	Metrics *Metrics
 	// ServiceName labels the otelgin trace spans.
 	ServiceName string
+	// TrustedProxies are the proxy CIDRs/IPs allowed to set X-Forwarded-For.
+	// Empty trusts none, so ClientIP() uses the direct peer and XFF can't be
+	// spoofed to dodge the per-IP rate limiter. Validated in config.Load.
+	TrustedProxies []string
 }
 
 func NewRouter(deps Deps) *gin.Engine {
 	r := gin.New()
+
+	// Decide whose X-Forwarded-For to trust. gin trusts all proxies by default,
+	// which would let any client spoof XFF and mint a fresh rate-limit bucket per
+	// request; pinning the trusted set (empty = trust none) closes that. The list
+	// is validated in config.Load, so an error here is unexpected — fail closed by
+	// trusting none rather than silently reverting to trust-all.
+	if err := r.SetTrustedProxies(deps.TrustedProxies); err != nil {
+		slog.Error("invalid trusted proxies, trusting none", "err", err)
+		_ = r.SetTrustedProxies(nil)
+	}
 
 	// RequestID first so everything downstream can stamp the ID. otelgin opens a
 	// span per request (a no-op tracer when tracing is disabled). Metrics sits

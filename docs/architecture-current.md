@@ -201,7 +201,8 @@ adminSession.Svc ──┼─► admin.Service ─► admin.Handler ─┘
 | `JWT_TTL` / `ADMIN_JWT_TTL` | 15m / 15m | 两端 access token 寿命 |
 | `REFRESH_TOKEN_TTL` / `ADMIN_REFRESH_TOKEN_TTL` | 720h / 720h | 两端 refresh token 寿命 |
 | `OTP_CODE_TTL` / `OTP_RESEND_COOLDOWN` / `OTP_DAILY_LIMIT` | 5m / 60s / 10 | 验证码策略 |
-| `APP_ENV` | development | 控制 Cookie Secure 等 |
+| `APP_ENV` | development | 控制 Cookie Secure、gin release 模式等 |
+| `TRUSTED_PROXIES` | （空=谁都不信） | 允许设置 `X-Forwarded-For` 的代理 CIDR/IP（逗号分隔）；置于 LB 后填 LB 网段，否则限流按直连 IP 计 |
 | `AUTO_MIGRATE` | false | 启动时是否自动迁移 |
 
 后台引导用的 `SEED_ADMIN_PHONE` / `SEED_ADMIN_PASSWORD` / `SEED_ADMIN_DISPLAY_NAME` 由 `cmd/seed`

@@ -43,6 +43,11 @@ services:
       ADMIN_JWT_SECRET: "change-me-a-DIFFERENT-long-random-string-for-admin"
       ADMIN_JWT_TTL: "24h"
       APP_ENV: "production"
+      # The app is exposed directly here, so the default (trust no proxy → rate
+      # limit by the direct peer IP) is correct. Once a reverse proxy / LB sits in
+      # front, set TRUSTED_PROXIES to its subnet(s) — otherwise every request looks
+      # like it comes from the LB and shares one rate-limit bucket.
+      # TRUSTED_PROXIES: "10.0.0.0/8"
     ports:
       - "8080:8080"
 
