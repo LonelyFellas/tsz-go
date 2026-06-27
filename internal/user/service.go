@@ -27,14 +27,37 @@ var (
 	// undifferentiated (and also covers "no account for this phone") so the flow
 	// never reveals which phone numbers are registered.
 	ErrInvalidResetCode = errors.New("invalid or expired reset code")
+	// ErrInvalidDeletionCode is returned by DeleteAccount when the submitted
+	// deletion code is wrong, expired, already used, or never issued. Like the
+	// reset-code error it stays undifferentiated so a failed confirmation reveals
+	// nothing beyond "that code won't delete the account".
+	ErrInvalidDeletionCode = errors.New("invalid or expired deletion code")
+	// ErrChannelUnavailable is returned when the caller asks to verify over a
+	// channel their account has no contact for — e.g. the email channel for an
+	// account with no email on file. The frontend should simply not offer that
+	// tab (see the deletion screen's phone/email toggle).
+	ErrChannelUnavailable = errors.New("verification channel unavailable for this account")
+	// ErrInvalidChannel is returned for a deletion channel that is neither phone
+	// nor email. The handler validates this first, so it is a defensive guard for
+	// direct service callers (tests).
+	ErrInvalidChannel = errors.New("invalid verification channel")
+)
+
+// Verification channels a self-service account deletion can be confirmed over.
+// The deletion screen shows them as the phone/email tabs; the code is always
+// sent to the account's own contact on file, never to a value the caller types.
+const (
+	DeletionChannelPhone = "phone"
+	DeletionChannelEmail = "email"
 )
 
 // Verification-code purposes. Each value is also constrained in the
 // verification_codes.purpose CHECK (see the migrations), so adding one here
 // means adding it there too.
 const (
-	codePurposeLogin         = "login"
-	codePurposePasswordReset = "password_reset"
+	codePurposeLogin           = "login"
+	codePurposePasswordReset   = "password_reset"
+	codePurposeAccountDeletion = "account_deletion"
 )
 
 // Store is the persistence behavior the Service depends on. Defining it as an
@@ -51,6 +74,10 @@ type Store interface {
 	GetLearningSettings(ctx context.Context, userID uuid.UUID) (*LearningSettings, error)
 	SetLearningSettings(ctx context.Context, userID uuid.UUID, s *LearningSettings) error
 	SetPassword(ctx context.Context, userID uuid.UUID, passwordHash string) error
+	// Delete removes a user and (via ON DELETE CASCADE) every row that hangs off
+	// them: roles, role profiles, refresh tokens. Returns ErrNotFound if no user
+	// has the given ID.
+	Delete(ctx context.Context, userID uuid.UUID) error
 }
 
 // Codes is the verification-code behavior the Service depends on for code-based
@@ -216,6 +243,70 @@ func (s *Service) ResetPassword(ctx context.Context, phone, code, newPassword st
 		return fmt.Errorf("revoke sessions: %w", err)
 	}
 	return nil
+}
+
+// RequestAccountDeletion sends a one-time confirmation code to the account's own
+// contact on the chosen channel (phone → SMS, email → email). The caller is the
+// authenticated account owner, so the code always goes to the contact already on
+// file — never to a value supplied in the request — which is what makes the code
+// proof of ownership. Asking to verify over a channel the account has no contact
+// for (e.g. email on a phone-only account) returns ErrChannelUnavailable.
+func (s *Service) RequestAccountDeletion(ctx context.Context, userID uuid.UUID, channel string) error {
+	u, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return err // includes ErrNotFound
+	}
+	target, err := deletionTarget(u, channel)
+	if err != nil {
+		return err
+	}
+	return s.codes.RequestCode(ctx, target, codePurposeAccountDeletion)
+}
+
+// DeleteAccount permanently removes the authenticated user's account after
+// verifying the confirmation code sent to the chosen channel. It first revokes
+// every session (so the user is signed out everywhere immediately) and then
+// deletes the account; the delete also cascades to every owned row — roles,
+// profiles, and any refresh tokens the revoke did not already cover. A wrong/
+// expired code surfaces as ErrInvalidDeletionCode; an already-deleted account
+// (stale token) surfaces as ErrNotFound.
+func (s *Service) DeleteAccount(ctx context.Context, userID uuid.UUID, channel, code string) error {
+	u, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return err // includes ErrNotFound
+	}
+	target, err := deletionTarget(u, channel)
+	if err != nil {
+		return err
+	}
+
+	if err := s.codes.Verify(ctx, target, codePurposeAccountDeletion, code); err != nil {
+		return ErrInvalidDeletionCode
+	}
+
+	// Revoke sessions explicitly rather than leaning on the row cascade alone, so
+	// "delete signs you out everywhere" holds even if the FK action ever changes.
+	if err := s.sessions.RevokeAll(ctx, u.ID); err != nil {
+		return fmt.Errorf("revoke sessions: %w", err)
+	}
+	return s.repo.Delete(ctx, u.ID)
+}
+
+// deletionTarget resolves the contact a deletion code is sent to / verified
+// against for the chosen channel. Email is optional on an account, so the email
+// channel is unavailable until one is on file.
+func deletionTarget(u *User, channel string) (string, error) {
+	switch channel {
+	case DeletionChannelPhone:
+		return u.Phone, nil
+	case DeletionChannelEmail:
+		if u.Email == "" {
+			return "", ErrChannelUnavailable
+		}
+		return u.Email, nil
+	default:
+		return "", ErrInvalidChannel
+	}
 }
 
 // Refresh rotates a refresh token and mints a fresh access token for its owner.

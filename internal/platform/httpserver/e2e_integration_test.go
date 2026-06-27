@@ -158,6 +158,64 @@ func TestE2E_RefreshAndSingleDevice(t *testing.T) {
 	}
 }
 
+// TestE2E_AccountDeletion drives the self-service account-deletion flow end to
+// end against the real DB. It is the only test that exercises migration 000013
+// (persisting a code with purpose 'account_deletion' must not violate the
+// verification_codes CHECK), and it proves the delete cascades: the user, their
+// roles/profiles and their sessions are all gone, and the phone is free to reuse.
+func TestE2E_AccountDeletion(t *testing.T) {
+	r, sender := buildRealRouter(t)
+	email := "e2e-" + uuid.NewString() + "@example.com"
+	phone := fmt.Sprintf("1%010d", time.Now().UnixNano()%1e10)
+
+	body := `{"phone":"` + phone + `","email":"` + email + `","password":"password123","display_name":"DEL","role":"student"}`
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/register", body, ""); w.Code != http.StatusCreated {
+		t.Fatalf("register status = %d, body=%s", w.Code, w.Body)
+	}
+	access, refresh := loginTokens(t, r, phone, "password123")
+
+	// the deletion endpoints require auth → 401 without a token
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/account/deletion-code", `{"channel":"phone"}`, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth deletion-code status = %d, want 401", w.Code)
+	}
+
+	// request a deletion code over the phone channel, read it from the mock sender
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/account/deletion-code", `{"channel":"phone"}`, access); w.Code != http.StatusOK {
+		t.Fatalf("deletion-code status = %d, body=%s", w.Code, w.Body)
+	}
+	code := sender.LastCode(phone)
+	if code == "" {
+		t.Fatal("mock sender did not capture a deletion code")
+	}
+
+	// a wrong code does not delete the account → 400
+	if w := req(t, r, http.MethodDelete, "/api/v1/auth/account", `{"channel":"phone","code":"000000"}`, access); w.Code != http.StatusBadRequest {
+		t.Fatalf("wrong-code delete status = %d, want 400, body=%s", w.Code, w.Body)
+	}
+
+	// delete with the real code → 204
+	if w := req(t, r, http.MethodDelete, "/api/v1/auth/account", `{"channel":"phone","code":"`+code+`"}`, access); w.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204, body=%s", w.Code, w.Body)
+	}
+
+	// the delete cascaded to sessions: the pre-delete refresh token is dead
+	if w := reqCookie(t, r, http.MethodPost, "/api/v1/auth/refresh", "", refresh); w.Code != http.StatusUnauthorized {
+		t.Fatalf("post-delete refresh status = %d, want 401", w.Code)
+	}
+	// the account is gone: neither password login nor a stale access token works
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login", `{"identifier":"`+phone+`","password":"password123"}`, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("login after delete status = %d, want 401", w.Code)
+	}
+	if w := req(t, r, http.MethodGet, "/api/v1/me", "", access); w.Code != http.StatusNotFound {
+		t.Fatalf("me with stale token status = %d, want 404", w.Code)
+	}
+
+	// the phone is free to reuse: a fresh registration with it succeeds
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/register", body, ""); w.Code != http.StatusCreated {
+		t.Fatalf("re-register with freed phone status = %d, want 201, body=%s", w.Code, w.Body)
+	}
+}
+
 func req(t *testing.T, r http.Handler, method, path, body, bearer string) *httptest.ResponseRecorder {
 	t.Helper()
 	var rdr *bytes.Buffer

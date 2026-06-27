@@ -130,6 +130,22 @@ func (r *Repository) SetPassword(ctx context.Context, userID uuid.UUID, password
 	return nil
 }
 
+// Delete removes a user row. Every table that references users(id) does so with
+// ON DELETE CASCADE (user_roles, student_profiles, teacher_profiles,
+// refresh_tokens), so this one statement also clears the user's roles, profiles
+// and sessions. Returns ErrNotFound if no user has the given ID, so a caller
+// acting on a stale ID gets a definite signal rather than a silent no-op.
+func (r *Repository) Delete(ctx context.Context, userID uuid.UUID) error {
+	ct, err := r.db.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("delete user: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // addRoleTx inserts the role membership and its role-specific profile row within
 // an existing transaction.
 func addRoleTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, role Role) error {

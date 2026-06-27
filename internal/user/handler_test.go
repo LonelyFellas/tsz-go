@@ -316,6 +316,78 @@ func TestHandler_ForgotPassword_RateLimited(t *testing.T) {
 	}
 }
 
+// registerAndGetUserID seeds a user via Register and returns their ID, the way an
+// authed handler would receive it from the access token's subject.
+func registerAndGetUserID(t *testing.T, h *Handler, body string) uuid.UUID {
+	t.Helper()
+	w := doJSON(t, h.Register, body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("seed register status = %d (body: %s)", w.Code, w.Body)
+	}
+	user, _ := decode(t, w)["user"].(map[string]any)
+	id, err := uuid.Parse(user["id"].(string))
+	if err != nil {
+		t.Fatalf("parse user id: %v", err)
+	}
+	return id
+}
+
+func TestHandler_RequestAndDeleteAccount(t *testing.T) {
+	h, _, _, _, _ := newTestHandler()
+	userID := registerAndGetUserID(t, h, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
+
+	// request a deletion code over the phone channel → 200
+	if w := doJSONAuthed(t, h.RequestAccountDeletion, `{"channel":"phone"}`, userID); w.Code != http.StatusOK {
+		t.Fatalf("request-deletion status = %d, want 200 (body: %s)", w.Code, w.Body)
+	}
+	// the fake issues "123456"; deleting with it → 204
+	if w := doJSONAuthed(t, h.DeleteAccount, `{"channel":"phone","code":"123456"}`, userID); w.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204 (body: %s)", w.Code, w.Body)
+	}
+	// the account is gone: a second delete with the same token → 404
+	if w := doJSONAuthed(t, h.DeleteAccount, `{"channel":"phone","code":"123456"}`, userID); w.Code != http.StatusNotFound {
+		t.Fatalf("post-delete status = %d, want 404 (body: %s)", w.Code, w.Body)
+	}
+}
+
+func TestHandler_DeleteAccount_Errors(t *testing.T) {
+	h, _, _, _, _ := newTestHandler()
+	// phone-only account: the email channel is unavailable
+	userID := registerAndGetUserID(t, h, `{"phone":"13800138000","password":"password123","display_name":"NE","role":"student"}`)
+	_ = doJSONAuthed(t, h.RequestAccountDeletion, `{"channel":"phone"}`, userID)
+
+	// wrong code → 400
+	if w := doJSONAuthed(t, h.DeleteAccount, `{"channel":"phone","code":"000000"}`, userID); w.Code != http.StatusBadRequest {
+		t.Fatalf("wrong-code status = %d, want 400 (body: %s)", w.Code, w.Body)
+	}
+	// missing code → 400 (binding)
+	if w := doJSONAuthed(t, h.DeleteAccount, `{"channel":"phone"}`, userID); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing-code status = %d, want 400", w.Code)
+	}
+	// bad channel → 400 (binding oneof)
+	if w := doJSONAuthed(t, h.DeleteAccount, `{"channel":"carrier-pigeon","code":"123456"}`, userID); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad-channel status = %d, want 400", w.Code)
+	}
+	// email channel on a phone-only account → 400 (channel unavailable), for both
+	// the code request and the delete itself
+	if w := doJSONAuthed(t, h.RequestAccountDeletion, `{"channel":"email"}`, userID); w.Code != http.StatusBadRequest {
+		t.Fatalf("request email-channel status = %d, want 400 (body: %s)", w.Code, w.Body)
+	}
+	if w := doJSONAuthed(t, h.DeleteAccount, `{"channel":"email","code":"123456"}`, userID); w.Code != http.StatusBadRequest {
+		t.Fatalf("delete email-channel status = %d, want 400 (body: %s)", w.Code, w.Body)
+	}
+}
+
+func TestHandler_RequestAccountDeletion_RateLimited(t *testing.T) {
+	h, _, codes, _, _ := newTestHandler()
+	userID := registerAndGetUserID(t, h, `{"phone":"13800138000","email":"rl@b.com","password":"password123","display_name":"RL","role":"student"}`)
+	codes.reqFn = func(string, string) error { return otp.ErrRateLimited }
+
+	if w := doJSONAuthed(t, h.RequestAccountDeletion, `{"channel":"phone"}`, userID); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("request-deletion status = %d, want 429 (body: %s)", w.Code, w.Body)
+	}
+}
+
 // registerAndGetRefresh seeds a user via Register and returns the refresh token
 // from the response cookie.
 func registerAndGetRefresh(t *testing.T, h *Handler) string {

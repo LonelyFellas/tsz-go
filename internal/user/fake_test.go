@@ -168,6 +168,20 @@ func (f *fakeStore) SetPassword(_ context.Context, userID uuid.UUID, passwordHas
 	return nil
 }
 
+func (f *fakeStore) Delete(_ context.Context, userID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.byID[userID]; !ok {
+		return ErrNotFound
+	}
+	// Mirror the DB's ON DELETE CASCADE: the user and everything hanging off them
+	// goes away together.
+	delete(f.byID, userID)
+	delete(f.roles, userID)
+	delete(f.settings, userID)
+	return nil
+}
+
 // fakeCodes is an in-memory Codes used to unit-test code-based login. RequestCode
 // records the "sent" code per target; Verify checks it and (on success) clears it.
 type fakeCodes struct {
