@@ -34,7 +34,7 @@ B / C 段（`/admin/users` 列表、审核、天生币、首页看板）**契约
 - 由后端用 `make migrate && make seed`（配 `SEED_ADMIN_PHONE` / `SEED_ADMIN_PASSWORD`）引导。
 - **不能自助注册**：`/api/v1/auth/register` 传 `role:"admin"` 会被拒（400）。
 - **强烈建议：管理员用独立账号**（专门的手机号，只持有 `admin` 角色）。这样登录后
-  `active_role` 直接就是 `admin`，前端无需做角色切换——见 §8 的限制说明。
+  `active_role` 直接就是 `admin`，前端无需做角色切换——多角色合并账号的切换方式见 §8。
 
 ---
 
@@ -135,16 +135,17 @@ Authorization: Bearer <access_token>
 
 ---
 
-## 8. 多角色与已知限制 ⚠️
+## 8. 多角色与角色切换 ✅
 
 - **推荐路径（无坑）**：管理员用**独立 admin 账号** → 登录后 `active_role` 即 `admin`，
   直接进后台，不需要切角色。
-- **已知限制**：若某账号**同时持有** `teacher` + `admin`，**当前无法把激活角色切到 `admin`**
-  ——`POST /auth/switch-role { role:"admin" }` 会返回 **400**（switch-role 暂只接受
-  `student`/`teacher`）。因此 **Phase A 阶段请勿用"教师兼管理员"的合并账号进后台**，
-  给管理员单独开号。
-- 这是后端待修项（让 switch-role 放行 admin；同时 `add-role` 仍**禁止**自助获取 admin，
-  防越权）。修好后本节会更新。
+- **已支持合并账号**：若某账号**同时持有** `teacher` + `admin`，可以
+  `POST /auth/switch-role { role:"admin" }` 把激活角色切到 `admin`（返回 **200** + 一枚
+  scope 为 admin 的新 access token），随后用它访问 `/api/v1/admin/*`。切到一个账号**未持有**
+  的角色仍返回 **403**。
+- **`add-role` 仍禁止 admin**：`POST /auth/roles { role:"admin" }` 返回 **400**。admin 只能
+  由后端 seed/bootstrap 离线发放，绝不能自助获取——否则任意登录用户都能把自己提权成管理员。
+  （switch-role 之所以能放行 admin，是因为它有 `HasRole` 门禁，只能激活已持有的角色，无法借此获取 admin。）
 
 ---
 

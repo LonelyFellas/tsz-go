@@ -273,15 +273,28 @@ func (h *Handler) LogoutAll(c *gin.Context) {
 	c.Writer.WriteHeaderNow()
 }
 
+// roleRequest is the add-role payload: it deliberately accepts only the
+// self-service roles (student, teacher). admin is excluded at the binding layer
+// because AddRole grants the caller a role on themselves — allowing admin here
+// would let any authenticated user self-promote to the back office. Granting
+// admin is an out-of-band operation (see Service.SeedAdmin).
 type roleRequest struct {
 	Role string `json:"role" binding:"required,oneof=student teacher"`
+}
+
+// switchRoleRequest is the switch-role payload. Unlike roleRequest it also
+// accepts admin, because switching only ever activates a role the caller
+// *already holds* — Service.SwitchRole gates on HasRole — so it cannot be used
+// to acquire admin, only to make an existing admin identity the active one.
+type switchRoleRequest struct {
+	Role string `json:"role" binding:"required,oneof=student teacher admin"`
 }
 
 // SwitchRole re-issues a token scoped to a role the user already holds.
 func (h *Handler) SwitchRole(c *gin.Context) {
 	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
 
-	var req roleRequest
+	var req switchRoleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

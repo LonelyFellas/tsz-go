@@ -459,11 +459,54 @@ func TestHandler_SwitchRole(t *testing.T) {
 	})
 
 	t.Run("400 invalid role value", func(t *testing.T) {
-		w := doJSONAuthed(t, h.SwitchRole, `{"role":"admin"}`, userID)
+		w := doJSONAuthed(t, h.SwitchRole, `{"role":"superuser"}`, userID)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", w.Code)
 		}
 	})
+
+	// admin is accepted at the binding layer (so an account that holds admin can
+	// activate it) but this student does not hold it → 403, not a 400.
+	t.Run("403 admin not held", func(t *testing.T) {
+		w := doJSONAuthed(t, h.SwitchRole, `{"role":"admin"}`, userID)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 (body: %s)", w.Code, w.Body)
+		}
+	})
+}
+
+// TestHandler_SwitchRole_ToHeldAdmin covers the back-office case: an account
+// that already holds admin (e.g. a teacher who was also seeded as admin) can
+// switch its active role to admin and get a token scoped to it. This is the gap
+// the dual-request split fixes — admin must pass binding for switch-role.
+func TestHandler_SwitchRole_ToHeldAdmin(t *testing.T) {
+	h, store, _, _, tm := newTestHandler()
+	w := doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"teacher"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("register status = %d", w.Code)
+	}
+	claims, err := tm.Parse(decode(t, w)["access_token"].(string))
+	if err != nil {
+		t.Fatalf("parse token: %v", err)
+	}
+	userID := claims.UserID
+
+	// Grant admin out of band, mirroring the seed/bootstrap path.
+	if err := store.AddAdminRole(context.Background(), userID); err != nil {
+		t.Fatalf("grant admin: %v", err)
+	}
+
+	w = doJSONAuthed(t, h.SwitchRole, `{"role":"admin"}`, userID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body)
+	}
+	m := decode(t, w)
+	if m["active_role"] != "admin" {
+		t.Errorf("active_role = %v, want admin", m["active_role"])
+	}
+	if token, _ := m["access_token"].(string); token == "" {
+		t.Error("response missing access_token")
+	}
 }
 
 func TestHandler_AddRole(t *testing.T) {
@@ -511,6 +554,16 @@ func TestHandler_AddRole(t *testing.T) {
 		w := doJSONAuthed(t, h.AddRole, `{"role":"superuser"}`, userID)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	// Privilege-escalation guard: add-role must never accept admin, or any
+	// authenticated user could self-promote into the back office. Unlike
+	// switch-role, admin is rejected at the binding layer here.
+	t.Run("400 admin is not self-grantable", func(t *testing.T) {
+		w := doJSONAuthed(t, h.AddRole, `{"role":"admin"}`, userID)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body)
 		}
 	})
 }
