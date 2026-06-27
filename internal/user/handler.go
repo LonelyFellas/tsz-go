@@ -270,6 +270,83 @@ func (h *Handler) ResetPassword(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "reset"})
 }
 
+type deletionCodeRequest struct {
+	Channel string `json:"channel" binding:"required,oneof=phone email"`
+}
+
+// RequestAccountDeletion sends a confirmation code to the authenticated user's
+// own phone or email so they can confirm self-service account deletion. The code
+// always goes to the contact on file (not a value in the body), so the request
+// only needs to pick the channel. 400 when the account has no contact for the
+// chosen channel (e.g. email tab on a phone-only account); 429 on the OTP rate
+// limit.
+func (h *Handler) RequestAccountDeletion(c *gin.Context) {
+	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
+
+	var req deletionCodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.svc.RequestAccountDeletion(c.Request.Context(), userID, req.Channel)
+	switch {
+	case errors.Is(err, ErrChannelUnavailable):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "verification channel unavailable for this account"})
+		return
+	case errors.Is(err, ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	case errors.Is(err, otp.ErrRateLimited):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many code requests, try again later"})
+		return
+	case err != nil:
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "sent"})
+}
+
+type deleteAccountRequest struct {
+	Channel string `json:"channel" binding:"required,oneof=phone email"`
+	Code    string `json:"code" binding:"required"`
+}
+
+// DeleteAccount permanently deletes the authenticated user's account once the
+// confirmation code checks out. The delete cascades to every owned row, so it
+// also ends all the user's sessions. A bad/expired code → 400; an already-deleted
+// account (stale token) → 404; success → 204 with no body.
+func (h *Handler) DeleteAccount(c *gin.Context) {
+	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
+
+	var req deleteAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.svc.DeleteAccount(c.Request.Context(), userID, req.Channel, req.Code)
+	switch {
+	case errors.Is(err, ErrChannelUnavailable):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "verification channel unavailable for this account"})
+		return
+	case errors.Is(err, ErrInvalidDeletionCode):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired deletion code"})
+		return
+	case errors.Is(err, ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	case err != nil:
+		internalError(c, err)
+		return
+	}
+
+	// 204 has no body; flush the status now so it's emitted even with no write.
+	c.Status(http.StatusNoContent)
+	c.Writer.WriteHeaderNow()
+}
+
 // Refresh exchanges the refresh-token cookie for a new access token and a rotated
 // refresh token (set back as a fresh cookie). A missing cookie or an
 // invalid/revoked/expired token → 401, and a stale cookie is cleared.

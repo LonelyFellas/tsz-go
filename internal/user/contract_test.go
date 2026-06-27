@@ -232,6 +232,42 @@ func runStoreContract(t *testing.T, newStore func() Store) {
 		}
 	})
 
+	t.Run("delete removes the user and cascades", func(t *testing.T) {
+		st := newStore()
+		u := mkUser()
+		if err := st.Create(ctx, u, RoleStudent); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		// Give the user a second role + onboarding so there are dependent rows to
+		// cascade (real DB) / clean up (fake).
+		if err := st.AddRole(ctx, u.ID, RoleTeacher); err != nil {
+			t.Fatalf("AddRole: %v", err)
+		}
+		if err := st.SetLearningSettings(ctx, u.ID, &LearningSettings{CEFRLevel: CEFRB1, EnglishVariant: VariantBritish}); err != nil {
+			t.Fatalf("SetLearningSettings: %v", err)
+		}
+
+		if err := st.Delete(ctx, u.ID); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if _, err := st.GetByID(ctx, u.ID); !errors.Is(err, ErrNotFound) {
+			t.Errorf("GetByID after delete: err = %v, want ErrNotFound", err)
+		}
+		// The phone/email are free to reuse: the unique indexes no longer see them.
+		again := mkUser()
+		again.Phone, again.Email = u.Phone, u.Email
+		if err := st.Create(ctx, again, RoleStudent); err != nil {
+			t.Errorf("re-create with the deleted user's identifiers: %v", err)
+		}
+	})
+
+	t.Run("delete a missing user returns ErrNotFound", func(t *testing.T) {
+		st := newStore()
+		if err := st.Delete(ctx, uuid.New()); !errors.Is(err, ErrNotFound) {
+			t.Errorf("Delete miss: err = %v, want ErrNotFound", err)
+		}
+	})
+
 	t.Run("learning settings require a student profile", func(t *testing.T) {
 		st := newStore()
 		u := mkUser()

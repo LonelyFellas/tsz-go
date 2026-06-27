@@ -471,6 +471,44 @@ Acquire an additional identity (e.g. a student who also starts teaching), then s
 
 ---
 
+#### `POST /api/v1/auth/account/deletion-code`
+Request a one-time code to confirm **account deletion**, sent to the account's own phone or email (picked by `channel`). Code lifetime: **5 minutes** (`OTP_CODE_TTL`). Pair with `DELETE /auth/account`.
+
+> The code always goes to the contact **on file**, never to a value in the request — so it proves you own the account.
+
+**Body**
+| Field | Type | Rules |
+|---|---|---|
+| `channel` | string | required, `phone` or `email`. The contact to send the code to. |
+
+**200**
+```json
+{ "status": "sent" }
+```
+**400** `verification channel unavailable for this account` — the account has no contact for the chosen channel (e.g. `email` on a phone-only account). The deletion screen should hide that tab.
+**429** `too many code requests, try again later` — per-target rate limit hit (`OTP_RESEND_COOLDOWN` / `OTP_DAILY_LIMIT`).
+
+---
+
+#### `DELETE /api/v1/auth/account`
+Permanently delete the authenticated account once the confirmation code checks out. **Irreversible.** The delete cascades to every owned row — roles, profiles, sessions — so the user is signed out everywhere and the freed phone/email can be reused by a new registration.
+
+**Body**
+| Field | Type | Rules |
+|---|---|---|
+| `channel` | string | required, `phone` or `email`. Must match the channel the code was sent to. |
+| `code` | string | required. The code from `account/deletion-code`. |
+
+```json
+{ "channel": "phone", "code": "123456" }
+```
+
+**204** No Content — the account was deleted.
+**400** validation error, `invalid or expired deletion code` (wrong/expired code), or `verification channel unavailable for this account`.
+**404** `user not found` — the account was already deleted (stale token).
+
+---
+
 ### Admin (back office)
 
 The `/api/v1/admin/*` endpoints back the management console (dashboard, user

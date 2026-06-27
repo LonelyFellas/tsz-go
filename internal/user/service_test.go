@@ -467,6 +467,89 @@ func TestService_ResetPassword_Disabled(t *testing.T) {
 	}
 }
 
+func TestService_DeleteAccount_Success(t *testing.T) {
+	svc, store, codes, _ := newTestService()
+	ctx := context.Background()
+	reg, _, refresh, _ := svc.Register(ctx, "13800138000", "del@example.com", "password123", "DEL", RoleStudent)
+
+	// request a deletion code over the phone channel, read it from the fake
+	if err := svc.RequestAccountDeletion(ctx, reg.ID, DeletionChannelPhone); err != nil {
+		t.Fatalf("request deletion: %v", err)
+	}
+	code := codes.codes["13800138000"]
+	if code == "" {
+		t.Fatalf("deletion code not recorded: %v", codes.codes)
+	}
+
+	if err := svc.DeleteAccount(ctx, reg.ID, DeletionChannelPhone, code); err != nil {
+		t.Fatalf("delete account: %v", err)
+	}
+
+	// the user is gone...
+	if _, err := store.GetByID(ctx, reg.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByID after delete: err = %v, want ErrNotFound", err)
+	}
+	// ...and so are their sessions: the pre-delete refresh token no longer rotates.
+	if _, _, err := svc.Refresh(ctx, refresh); !errors.Is(err, session.ErrInvalidRefreshToken) {
+		t.Errorf("post-delete refresh err = %v, want ErrInvalidRefreshToken", err)
+	}
+}
+
+func TestService_DeleteAccount_ViaEmailChannel(t *testing.T) {
+	svc, store, codes, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "del-e@example.com", "password123", "DELE", RoleStudent)
+
+	if err := svc.RequestAccountDeletion(ctx, reg.ID, DeletionChannelEmail); err != nil {
+		t.Fatalf("request deletion: %v", err)
+	}
+	// the code is sent to the email target, not the phone
+	code := codes.codes["del-e@example.com"]
+	if code == "" {
+		t.Fatalf("deletion code not sent to email target: %v", codes.codes)
+	}
+	if err := svc.DeleteAccount(ctx, reg.ID, DeletionChannelEmail, code); err != nil {
+		t.Fatalf("delete account: %v", err)
+	}
+	if _, err := store.GetByID(ctx, reg.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByID after delete: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestService_DeleteAccount_WrongCode(t *testing.T) {
+	svc, store, _, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "del-w@example.com", "password123", "DELW", RoleStudent)
+	_ = svc.RequestAccountDeletion(ctx, reg.ID, DeletionChannelPhone)
+
+	if err := svc.DeleteAccount(ctx, reg.ID, DeletionChannelPhone, "000000"); !errors.Is(err, ErrInvalidDeletionCode) {
+		t.Fatalf("err = %v, want ErrInvalidDeletionCode", err)
+	}
+	// the account survives a failed confirmation
+	if _, err := store.GetByID(ctx, reg.ID); err != nil {
+		t.Errorf("account should still exist after a wrong code: %v", err)
+	}
+}
+
+// The email channel is unavailable on a phone-only account: both requesting a
+// code and confirming over it fail before any code is sent, and the account is
+// never touched.
+func TestService_DeleteAccount_EmailChannelUnavailable(t *testing.T) {
+	svc, _, codes, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "", "password123", "NOEMAIL", RoleStudent)
+
+	if err := svc.RequestAccountDeletion(ctx, reg.ID, DeletionChannelEmail); !errors.Is(err, ErrChannelUnavailable) {
+		t.Fatalf("request err = %v, want ErrChannelUnavailable", err)
+	}
+	if len(codes.codes) != 0 {
+		t.Errorf("no code should have been sent, got %v", codes.codes)
+	}
+	if err := svc.DeleteAccount(ctx, reg.ID, DeletionChannelEmail, "123456"); !errors.Is(err, ErrChannelUnavailable) {
+		t.Fatalf("delete err = %v, want ErrChannelUnavailable", err)
+	}
+}
+
 func TestService_Logout_RevokesRefresh(t *testing.T) {
 	svc, _, _, _ := newTestService()
 	ctx := context.Background()

@@ -533,6 +533,92 @@ paths:
                 $ref: "#/components/schemas/Error"
               example: { error: "user already has this role" }
 
+  /api/v1/auth/account/deletion-code:
+    post:
+      tags: [Auth (authenticated)]
+      summary: Request an account-deletion code (SMS or email)
+      operationId: requestAccountDeletion
+      description: |
+        Sends a one-time confirmation code to the authenticated account's own
+        phone or email (code lifetime 5 minutes, `OTP_CODE_TTL`), chosen by
+        `channel`. The code always goes to the contact on file — never a value in
+        the request — so it proves ownership. Pair with `DELETE /auth/account`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeletionCodeRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: sent
+        "400":
+          description: |
+            Bad Request — validation error, or the account has no contact for the
+            chosen channel (e.g. the email channel on a phone-only account).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "verification channel unavailable for this account" }
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          description: |
+            Too Many Requests — per-target rate limit hit (resend cooldown
+            `OTP_RESEND_COOLDOWN`, or daily cap `OTP_DAILY_LIMIT`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "too many code requests, try again later" }
+
+  /api/v1/auth/account:
+    delete:
+      tags: [Auth (authenticated)]
+      summary: Permanently delete the account (with code)
+      operationId: deleteAccount
+      description: |
+        Permanently deletes the authenticated user's account after verifying the
+        confirmation code from `/auth/account/deletion-code`. The delete cascades
+        to every owned row — roles, profiles, sessions — so the user is signed out
+        everywhere and their phone/email become free to reuse. Irreversible.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteAccountRequest"
+      responses:
+        "204":
+          description: No Content — the account was deleted.
+        "400":
+          description: |
+            Bad Request — validation error, an invalid/expired deletion code, or
+            the account has no contact for the chosen channel.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "invalid or expired deletion code" }
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "404":
+          description: Not Found — the account no longer exists (stale token).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "user not found" }
+
   # ── Admin (back office) ──────────────────────────────────────────────
   # All /api/v1/admin/* endpoints take an ADMIN-realm token (adminBearerAuth),
   # which is a different identity store and signing key from the web realm — a web
@@ -1343,6 +1429,33 @@ components:
       properties:
         role:
           $ref: "#/components/schemas/Role"
+
+    DeletionChannel:
+      type: string
+      enum: [phone, email]
+      description: |
+        Which contact on the account the deletion code is sent to / verified
+        against. The email channel is only available once the account has an email
+        on file (the deletion screen hides the tab otherwise).
+
+    DeletionCodeRequest:
+      type: object
+      description: request-account-deletion-code payload — picks the channel only.
+      required: [channel]
+      properties:
+        channel:
+          $ref: "#/components/schemas/DeletionChannel"
+
+    DeleteAccountRequest:
+      type: object
+      description: delete-account payload — the channel plus the confirmation code.
+      required: [channel, code]
+      properties:
+        channel:
+          $ref: "#/components/schemas/DeletionChannel"
+        code:
+          type: string
+          example: "123456"
 
     AuthResponse:
       type: object

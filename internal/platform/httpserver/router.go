@@ -96,6 +96,10 @@ func NewRouter(deps Deps) *gin.Engine {
 			authed.POST("/auth/switch-role", deps.UserHandler.SwitchRole)
 			// Acquire an additional identity (e.g. a student who also teaches).
 			authed.POST("/auth/roles", deps.UserHandler.AddRole)
+			// Self-service account deletion: request an OTP to the account's own
+			// phone/email, then confirm with it to permanently delete the account.
+			authed.POST("/auth/account/deletion-code", deps.UserHandler.RequestAccountDeletion)
+			authed.DELETE("/auth/account", deps.UserHandler.DeleteAccount)
 		}
 
 		// Back office: a separate identity realm with its own token manager and
