@@ -19,9 +19,10 @@ import (
 // Buckets are created lazily and swept after an idle period so memory stays
 // bounded under a churn of distinct IPs.
 //
-// Note: it keys on gin's ClientIP(), which trusts X-Forwarded-For from
-// configured proxies. Behind a proxy/LB, set the engine's trusted proxies so a
-// client can't spoof the header and mint a fresh bucket per request.
+// Note: it keys on gin's ClientIP(), which honors X-Forwarded-For only from
+// proxies in the engine's trusted set. That set is pinned from TRUSTED_PROXIES
+// (empty = trust none) in NewRouter, so a client can't spoof the header to mint
+// a fresh bucket per request; behind an LB, list the LB subnet there.
 type IPRateLimiter struct {
 	mu       sync.Mutex
 	buckets  map[string]*ipBucket

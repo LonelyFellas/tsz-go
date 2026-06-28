@@ -163,15 +163,27 @@ func (s *Service) Verify(ctx context.Context, target, purpose, code string) erro
 }
 
 // generateCode returns a zero-padded numeric code of codeDigits length, drawn
-// from a cryptographically secure source.
+// from a cryptographically secure source. It uses rejection sampling rather than
+// a plain byte%10: 256 is not a multiple of 10, so %10 would bias digits 0–5
+// slightly higher. Bytes ≥ 250 (the largest multiple of 10 below 256) are
+// discarded so every digit is uniform.
 func generateCode() (string, error) {
 	const digits = "0123456789"
-	b := make([]byte, codeDigits)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+	out := make([]byte, 0, codeDigits)
+	buf := make([]byte, codeDigits)
+	for len(out) < codeDigits {
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
+		}
+		for _, v := range buf {
+			if v >= 250 { // reject to keep the digit distribution uniform
+				continue
+			}
+			out = append(out, digits[v%10])
+			if len(out) == codeDigits {
+				break
+			}
+		}
 	}
-	for i := range b {
-		b[i] = digits[int(b[i])%len(digits)]
-	}
-	return string(b), nil
+	return string(out), nil
 }

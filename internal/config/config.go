@@ -4,8 +4,10 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -64,6 +66,12 @@ type Config struct {
 	TracingInsecure bool
 	// ServiceName labels metrics and traces (default "tsz-go").
 	ServiceName string
+	// TrustedProxies lists the proxy CIDRs/IPs whose X-Forwarded-For header is
+	// honored when resolving the client IP. Empty (the default) trusts none, so
+	// ClientIP() falls back to the direct peer address and a client cannot spoof
+	// XFF to mint a fresh rate-limit bucket per request. Behind a load balancer,
+	// set TRUSTED_PROXIES to the LB's subnet(s) so the real client IP is used.
+	TrustedProxies []string
 }
 
 func Load() (Config, error) {
@@ -89,6 +97,7 @@ func Load() (Config, error) {
 		TracingEndpoint:      os.Getenv("TRACING_ENDPOINT"),
 		TracingInsecure:      getbool("TRACING_INSECURE", true),
 		ServiceName:          getenv("SERVICE_NAME", "tsz-go"),
+		TrustedProxies:       getcsv("TRUSTED_PROXIES"),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -103,7 +112,31 @@ func Load() (Config, error) {
 	if cfg.AdminJWTSecret == cfg.JWTSecret {
 		return cfg, fmt.Errorf("config: ADMIN_JWT_SECRET must differ from JWT_SECRET (realm isolation)")
 	}
+	// Reject a malformed proxy list at startup rather than silently falling back
+	// to trusting nothing (which would route every request through one bucket
+	// behind an LB). Accept CIDR blocks and bare IPs, matching what gin allows.
+	for _, p := range cfg.TrustedProxies {
+		if _, _, err := net.ParseCIDR(p); err != nil && net.ParseIP(p) == nil {
+			return cfg, fmt.Errorf("config: TRUSTED_PROXIES entry %q is not a valid CIDR or IP", p)
+		}
+	}
 	return cfg, nil
+}
+
+// getcsv reads a comma-separated env var into a trimmed, non-empty slice. An
+// unset or blank value yields nil.
+func getcsv(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getenv(key, fallback string) string {

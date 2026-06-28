@@ -36,6 +36,46 @@ func TestLoad_Success(t *testing.T) {
 	}
 }
 
+func TestLoad_TrustedProxies(t *testing.T) {
+	t.Run("parses and trims a CSV list", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("TRUSTED_PROXIES", " 10.0.0.0/8 , 192.168.1.1 ")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"10.0.0.0/8", "192.168.1.1"}
+		if len(cfg.TrustedProxies) != len(want) {
+			t.Fatalf("TrustedProxies = %v, want %v", cfg.TrustedProxies, want)
+		}
+		for i, p := range want {
+			if cfg.TrustedProxies[i] != p {
+				t.Errorf("TrustedProxies[%d] = %q, want %q", i, cfg.TrustedProxies[i], p)
+			}
+		}
+	})
+
+	t.Run("unset trusts none", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("TRUSTED_PROXIES", "")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.TrustedProxies != nil {
+			t.Errorf("TrustedProxies = %v, want nil", cfg.TrustedProxies)
+		}
+	})
+
+	t.Run("rejects a malformed entry", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("TRUSTED_PROXIES", "10.0.0.0/8,not-an-ip")
+		if _, err := Load(); err == nil {
+			t.Fatal("expected an error for a malformed TRUSTED_PROXIES entry, got nil")
+		}
+	})
+}
+
 func TestLoad_Defaults(t *testing.T) {
 	setRequired(t)
 	// empty values must fall back to defaults

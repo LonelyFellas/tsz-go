@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/darwish/tsz-go/docs"
 	"github.com/darwish/tsz-go/internal/admin"
 	"github.com/darwish/tsz-go/internal/auth"
@@ -43,6 +45,13 @@ func run() error {
 		return err
 	}
 	slog.SetDefault(applog.New(cfg.LogLevel))
+
+	// Outside development, run gin in release mode: no debug route dump, no
+	// per-request debug path, and no "running in debug mode" warning — quieter
+	// logs and a touch less per-request overhead.
+	if cfg.Env != "development" {
+		gin.SetMode(gin.ReleaseMode)
+	}
 
 	ctx := context.Background()
 
@@ -137,6 +146,7 @@ func run() error {
 		DB:                pool,
 		Metrics:           metrics,
 		ServiceName:       cfg.ServiceName,
+		TrustedProxies:    cfg.TrustedProxies,
 	})
 
 	srv := &http.Server{
