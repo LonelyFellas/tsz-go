@@ -539,3 +539,120 @@ func (h *Handler) UpdateLearningSettings(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"learning_settings": settings, "onboarded": true})
 }
+
+type updateProfileRequest struct {
+	// DisplayName mirrors register's rule (1–50 chars). The service additionally
+	// rejects a whitespace-only value after trimming.
+	DisplayName string `json:"display_name" binding:"required,min=1,max=50"`
+}
+
+// UpdateProfile edits the authenticated user's profile. Today that is just the
+// display name (the "昵称" field on the edit-profile screen); avatar upload lands
+// with the OSS backend. Returns the refreshed user. A blank-after-trim name → 400;
+// a stale token whose account is gone → 404.
+func (h *Handler) UpdateProfile(c *gin.Context) {
+	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
+
+	var req updateProfileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	u, err := h.svc.UpdateDisplayName(c.Request.Context(), userID, req.DisplayName)
+	switch {
+	case errors.Is(err, ErrInvalidDisplayName):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "display name cannot be blank"})
+		return
+	case errors.Is(err, ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	case err != nil:
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"user": u})
+}
+
+type contactBindCodeRequest struct {
+	Contact string `json:"contact" binding:"required"` // the NEW phone or email to bind
+}
+
+// RequestContactBindCode sends a one-time code to a new contact (phone or email)
+// the user wants to bind. The code goes to the value in the body — not a contact
+// on file — so confirming it proves control of the new contact. A malformed value
+// → 400; one already taken by another account → 409; the OTP rate limit → 429.
+func (h *Handler) RequestContactBindCode(c *gin.Context) {
+	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
+
+	var req contactBindCodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.svc.RequestContactBindCode(c.Request.Context(), userID, req.Contact)
+	switch {
+	case errors.Is(err, ErrInvalidContact):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid contact"})
+		return
+	case errors.Is(err, ErrEmailTaken):
+		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+		return
+	case errors.Is(err, ErrPhoneTaken):
+		c.JSON(http.StatusConflict, gin.H{"error": "phone already registered"})
+		return
+	case errors.Is(err, otp.ErrRateLimited):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many code requests, try again later"})
+		return
+	case err != nil:
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "sent"})
+}
+
+type contactBindRequest struct {
+	Contact string `json:"contact" binding:"required"`
+	Code    string `json:"code" binding:"required"`
+}
+
+// BindContact verifies the bind code and writes the new phone/email onto the
+// account. Returns the refreshed user. A malformed value → 400; a wrong/expired
+// code → 400; a value taken by another account (incl. a concurrent bind) → 409; a
+// stale token whose account is gone → 404.
+func (h *Handler) BindContact(c *gin.Context) {
+	userID := c.MustGet(auth.ContextUserIDKey).(uuid.UUID)
+
+	var req contactBindRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	u, err := h.svc.BindContact(c.Request.Context(), userID, req.Contact, req.Code)
+	switch {
+	case errors.Is(err, ErrInvalidContact):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid contact"})
+		return
+	case errors.Is(err, ErrInvalidBindCode):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired verification code"})
+		return
+	case errors.Is(err, ErrEmailTaken):
+		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+		return
+	case errors.Is(err, ErrPhoneTaken):
+		c.JSON(http.StatusConflict, gin.H{"error": "phone already registered"})
+		return
+	case errors.Is(err, ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	case err != nil:
+		internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"user": u})
+}

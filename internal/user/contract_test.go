@@ -313,6 +313,85 @@ func runStoreContract(t *testing.T, newStore func() Store) {
 		}
 	})
 
+	t.Run("set display name overwrites and rejects a missing user", func(t *testing.T) {
+		st := newStore()
+		u := mkUser()
+		if err := st.Create(ctx, u, RoleStudent); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := st.SetDisplayName(ctx, u.ID, "Renamed"); err != nil {
+			t.Fatalf("SetDisplayName: %v", err)
+		}
+		got, err := st.GetByID(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if got.DisplayName != "Renamed" {
+			t.Errorf("display name = %q, want %q", got.DisplayName, "Renamed")
+		}
+		if err := st.SetDisplayName(ctx, uuid.New(), "x"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("SetDisplayName miss: err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("set contact binds email and phone", func(t *testing.T) {
+		st := newStore()
+		// A phone-only account binds an email; then changes its phone.
+		u := mkUser()
+		u.Email = ""
+		if err := st.Create(ctx, u, RoleStudent); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		newEmail := ctEmail()
+		if err := st.SetContact(ctx, u.ID, ContactChannelEmail, newEmail); err != nil {
+			t.Fatalf("SetContact email: %v", err)
+		}
+		newPhone := randPhone()
+		if err := st.SetContact(ctx, u.ID, ContactChannelPhone, newPhone); err != nil {
+			t.Fatalf("SetContact phone: %v", err)
+		}
+		got, err := st.GetByID(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if got.Email != newEmail {
+			t.Errorf("email = %q, want %q", got.Email, newEmail)
+		}
+		if got.Phone != newPhone {
+			t.Errorf("phone = %q, want %q", got.Phone, newPhone)
+		}
+		// The bound contacts are now findable.
+		if byEmail, err := st.GetByEmail(ctx, newEmail); err != nil || byEmail.ID != u.ID {
+			t.Errorf("GetByEmail after bind: id=%v err=%v", byEmail, err)
+		}
+	})
+
+	t.Run("set contact rejects a value held by another account", func(t *testing.T) {
+		st := newStore()
+		owner := mkUser()
+		if err := st.Create(ctx, owner, RoleStudent); err != nil {
+			t.Fatalf("Create owner: %v", err)
+		}
+		other := mkUser()
+		if err := st.Create(ctx, other, RoleStudent); err != nil {
+			t.Fatalf("Create other: %v", err)
+		}
+		// other tries to take owner's email / phone → taken
+		if err := st.SetContact(ctx, other.ID, ContactChannelEmail, owner.Email); !errors.Is(err, ErrEmailTaken) {
+			t.Errorf("SetContact dup email: err = %v, want ErrEmailTaken", err)
+		}
+		if err := st.SetContact(ctx, other.ID, ContactChannelPhone, owner.Phone); !errors.Is(err, ErrPhoneTaken) {
+			t.Errorf("SetContact dup phone: err = %v, want ErrPhoneTaken", err)
+		}
+	})
+
+	t.Run("set contact on a missing user returns ErrNotFound", func(t *testing.T) {
+		st := newStore()
+		if err := st.SetContact(ctx, uuid.New(), ContactChannelEmail, ctEmail()); !errors.Is(err, ErrNotFound) {
+			t.Errorf("SetContact miss: err = %v, want ErrNotFound", err)
+		}
+	})
+
 	t.Run("learning settings require a student profile", func(t *testing.T) {
 		st := newStore()
 		u := mkUser()

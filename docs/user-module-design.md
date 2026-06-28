@@ -152,8 +152,15 @@ access token 仍是无状态 HS256 JWT，新增两点：
 | POST | `/api/v1/auth/send-code` · `/login/code` | 验证码登录 |
 | POST | `/api/v1/auth/refresh` · `/logout` | 刷新 / 注销 |
 | GET  | `/api/v1/me` | 当前用户 + active_role + 学习设置 + onboarded |
+| PATCH | `/api/v1/me` | 编辑资料：改昵称 `display_name`（1–50，去空格后非空）；返回刷新后的 user |
+| POST | `/api/v1/me/contact/bind-code` · `/me/contact/bind` | 绑定/换绑邮箱或手机：验证码发到**新**联系方式，确认后写入 |
 | POST | `/api/v1/auth/switch-role` · `/auth/roles` · `/auth/logout-all` | 角色切换 / 加角色 / 全端登出 |
 | PUT  | `/api/v1/me/learning-settings` | 学习设置 |
+
+> **编辑资料页（“编辑资料 / 个人中心”）的后端支撑**：展示走 `GET /me`；改昵称走 `PATCH /me`；绑定/换绑邮箱手机走 `bind-code` + `bind`（详见下）。**头像上传仍未做**（依赖 OSS，见 §12.4）——前端先用空 `avatar_url` 兜底默认图。
+>
+> **绑定/换绑联系方式的安全语义**（区别于登录/找回/注销发码）：那几个发码接口的码只发到账户**已登记**的联系方式（防止向任意地址发码、防账号枚举）；绑定流程**正好相反**——要往一个**尚未登记的新地址**发码以验证所有权，故**单独实现**，不复用 `send-code`。发码前做：① 新值格式校验（含 `@` 视为邮箱，否则手机 5–20 位）→ 400 `invalid contact`；② 唯一性预检（被**别的**账户占用 → 409，且**不发码**；占用自己＝无害幂等）。确认 `bind` 时再预检一次、消费验证码、写入；DB 唯一索引兜底并发竞态 → 409。验证码 purpose=`contact_bind`（迁移 000016 放宽 CHECK）。
+> 说明：409 暴露“该邮箱/手机已被占用”是**有意**的——此为**已登录**接口，用户需要知道自己选的联系方式不可用，账号枚举顾虑只适用于公开未登录接口。
 
 > ⚠️ `switch-role` 的 `oneof` 收回到 `student teacher`（移除 admin）；admin 不再是 web 角色。
 
@@ -349,6 +356,7 @@ async function bootstrapAdmin() {
 - [x] **handler 层 409/404 映射断言**:已补 `internal/admin/handler_test.go`(`TestHandler_SetAdminStatus`,表驱动覆盖 200/404/409/400)。`SetAdminStatus` 的 `ErrLastSuperAdmin→409`、`ErrNotFound→404`、非法 id/status→400 均有断言。
 
 ### 12.4 头像存储 / 上传（OSS） —— 上线后功能,非阻断
+> 编辑资料页的其余功能（改昵称 `PATCH /me`、绑定/换绑邮箱手机 `bind-code`+`bind`）**已实现**（见 §6.1）。**头像上传是这张页面唯一仍缺的后端项**,因依赖 OSS 暂放。
 - [ ] **头像上传 + OSS 落地** —— 状态:**字段已就位,上传未做**。`users.avatar_url` 列与 `User.AvatarURL` 已随 PR #28 合入,当前恒为空、无写入路径;前端拿到空串即用本地默认头像兜底。
   - **触发条件**:产品需要用户自定义头像、且对象存储(OSS)已开通时再做。在那之前空串即可,无需任何改动。
   - **设计(已与评审确定,落地时照此做)**:

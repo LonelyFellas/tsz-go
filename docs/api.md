@@ -411,6 +411,76 @@ Current user, the role the token is acting as, and the learner's onboarding stat
 
 ---
 
+#### `PATCH /api/v1/me`
+Edit the authenticated user's profile. Today this updates only the **display name** (the "昵称" on the edit-profile screen); avatar upload lands with the OSS storage backend. Returns the refreshed user.
+
+**Body**
+| Field | Type | Rules |
+|---|---|---|
+| `display_name` | string | required, 1–50 chars. Trimmed; a whitespace-only value is rejected. |
+
+```json
+{ "display_name": "新昵称" }
+```
+
+**200**
+```json
+{ "user": { /* User */ } }
+```
+**400** validation error, or `display name cannot be blank` (whitespace-only after trimming)
+**404** `user not found` — the account no longer exists (stale token)
+
+---
+
+#### `POST /api/v1/me/contact/bind-code`
+Send a one-time code to a **new** contact (phone or email) the user wants to **bind or change** — the "绑定邮箱 / 绑定手机" flow. Unlike `send-code` / `password/forgot` / `account/deletion-code` (which send to a contact **already on file**), this code goes to the **value in the request**, so confirming it proves the user controls that new contact. Code lifetime: **5 minutes** (`OTP_CODE_TTL`). Pair with `POST /me/contact/bind`.
+
+The contact's shape decides the channel: a value containing `@` is treated as an **email** (delivered by email), otherwise a **phone** (delivered by SMS). The value is validated and checked for availability **before** any code is sent.
+
+**Body**
+| Field | Type | Rules |
+|---|---|---|
+| `contact` | string | required. The new phone (5–20 chars) or a valid email. |
+
+```json
+{ "contact": "newuser@example.com" }
+```
+
+**200**
+```json
+{ "status": "sent" }
+```
+**400** `invalid contact` — neither a valid email nor a 5–20 char phone
+**409** `email already registered` / `phone already registered` — the contact already belongs to **another** account (nothing is sent)
+**429** `too many code requests, try again later` — per-target OTP rate limit (`OTP_RESEND_COOLDOWN` / `OTP_DAILY_LIMIT`)
+
+> Unlike the public account-probing-safe endpoints, this **authenticated** flow deliberately returns `409` for a taken contact: the user needs to know their chosen email/phone is unavailable, and they are already signed in.
+
+---
+
+#### `POST /api/v1/me/contact/bind`
+Verify the code from `bind-code` and write the new phone/email onto the account — **binding a missing contact or replacing an existing one**. Availability is re-checked before the code is consumed; the database's unique index is the final guard against a concurrent bind of the same value. Returns the refreshed user.
+
+**Body**
+| Field | Type | Rules |
+|---|---|---|
+| `contact` | string | required. Must match the contact `bind-code` was sent to. |
+| `code` | string | required. The code from `bind-code`. |
+
+```json
+{ "contact": "newuser@example.com", "code": "123456" }
+```
+
+**200**
+```json
+{ "user": { /* User */ } }
+```
+**400** validation error, `invalid contact`, or `invalid or expired verification code`
+**409** `email already registered` / `phone already registered` — taken by another account (including a concurrent bind)
+**404** `user not found` — the account no longer exists (stale token)
+
+---
+
 #### `PUT /api/v1/me/learning-settings`
 Set the learner's CEFR level + English variant. Backs both **new-user onboarding** and later edits from the settings screen (e.g. the BrE/AmE toggle). Both fields are required and written together.
 

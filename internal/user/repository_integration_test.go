@@ -317,4 +317,10 @@ func TestRepository_QueryError(t *testing.T) {
 	if err := repo.Create(ctx, u, RoleStudent); err == nil || errors.Is(err, ErrEmailTaken) {
 		t.Errorf("Create err = %v, want a real query error", err)
 	}
+	if err := repo.SetDisplayName(ctx, uuid.New(), "x"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("SetDisplayName err = %v, want a real query error", err)
+	}
+	if err := repo.SetContact(ctx, uuid.New(), ContactChannelEmail, uniqueEmail()); err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrEmailTaken) {
+		t.Errorf("SetContact err = %v, want a real query error", err)
+	}
 }

@@ -725,6 +725,174 @@ func TestService_GetByID(t *testing.T) {
 	}
 }
 
+func TestService_UpdateDisplayName(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "dn@example.com", "password123", "Old", RoleStudent)
+
+	// success: the name is trimmed and the refreshed user reflects it
+	u, err := svc.UpdateDisplayName(ctx, reg.ID, "  New Name  ")
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if u.DisplayName != "New Name" {
+		t.Errorf("display name = %q, want trimmed %q", u.DisplayName, "New Name")
+	}
+	// persisted
+	if got, _ := svc.GetByID(ctx, reg.ID); got.DisplayName != "New Name" {
+		t.Errorf("persisted display name = %q, want %q", got.DisplayName, "New Name")
+	}
+
+	// whitespace-only → ErrInvalidDisplayName, and the name is unchanged
+	if _, err := svc.UpdateDisplayName(ctx, reg.ID, "   "); !errors.Is(err, ErrInvalidDisplayName) {
+		t.Errorf("blank name err = %v, want ErrInvalidDisplayName", err)
+	}
+	if got, _ := svc.GetByID(ctx, reg.ID); got.DisplayName != "New Name" {
+		t.Errorf("display name changed on a rejected blank update: %q", got.DisplayName)
+	}
+
+	// missing user → ErrNotFound
+	if _, err := svc.UpdateDisplayName(ctx, uuid.New(), "X"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing user err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestService_BindContact_Email(t *testing.T) {
+	svc, _, codes, _ := newTestService()
+	ctx := context.Background()
+	// a phone-only account binds an email
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "", "password123", "P", RoleStudent)
+
+	// the bind code is sent to the NEW email (normalized), not any contact on file
+	if err := svc.RequestContactBindCode(ctx, reg.ID, "New@Example.com"); err != nil {
+		t.Fatalf("request bind code: %v", err)
+	}
+	code := codes.codes["new@example.com"]
+	if code == "" {
+		t.Fatalf("bind code not sent to the new email target: %v", codes.codes)
+	}
+
+	u, err := svc.BindContact(ctx, reg.ID, "New@Example.com", code)
+	if err != nil {
+		t.Fatalf("bind contact: %v", err)
+	}
+	if u.Email != "new@example.com" {
+		t.Errorf("email = %q, want normalized new@example.com", u.Email)
+	}
+	// the bound email now logs in
+	if _, _, _, err := svc.LoginPassword(ctx, "new@example.com", "password123"); err != nil {
+		t.Errorf("login by bound email: %v", err)
+	}
+	// the code is single-use: replaying it fails
+	if _, err := svc.BindContact(ctx, reg.ID, "new@example.com", code); !errors.Is(err, ErrInvalidBindCode) {
+		t.Errorf("replayed bind code err = %v, want ErrInvalidBindCode", err)
+	}
+}
+
+func TestService_BindContact_Phone(t *testing.T) {
+	svc, _, codes, _ := newTestService()
+	ctx := context.Background()
+	// an email-only account binds a phone
+	reg, _, _, _ := svc.Register(ctx, "", "ep@example.com", "password123", "E", RoleStudent)
+
+	if err := svc.RequestContactBindCode(ctx, reg.ID, " 13900139000 "); err != nil {
+		t.Fatalf("request bind code: %v", err)
+	}
+	code := codes.codes["13900139000"]
+	if code == "" {
+		t.Fatalf("bind code not sent to the new phone target: %v", codes.codes)
+	}
+	u, err := svc.BindContact(ctx, reg.ID, "13900139000", code)
+	if err != nil {
+		t.Fatalf("bind contact: %v", err)
+	}
+	if u.Phone != "13900139000" {
+		t.Errorf("phone = %q, want 13900139000", u.Phone)
+	}
+}
+
+func TestService_BindContact_WrongCode(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "", "password123", "P", RoleStudent)
+	_ = svc.RequestContactBindCode(ctx, reg.ID, "new@example.com")
+
+	if _, err := svc.BindContact(ctx, reg.ID, "new@example.com", "000000"); !errors.Is(err, ErrInvalidBindCode) {
+		t.Fatalf("err = %v, want ErrInvalidBindCode", err)
+	}
+	// the contact was not written
+	if got, _ := svc.GetByID(ctx, reg.ID); got.Email != "" {
+		t.Errorf("email = %q, want empty after a failed bind", got.Email)
+	}
+}
+
+func TestService_BindContact_InvalidContact(t *testing.T) {
+	svc, _, codes, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "", "password123", "P", RoleStudent)
+
+	for _, bad := range []string{"not-an-email@", "@nope", "123" /* too short phone */, "Name <a@b.com>"} {
+		if err := svc.RequestContactBindCode(ctx, reg.ID, bad); !errors.Is(err, ErrInvalidContact) {
+			t.Errorf("RequestContactBindCode(%q) err = %v, want ErrInvalidContact", bad, err)
+		}
+	}
+	// nothing was sent for any invalid contact
+	if len(codes.codes) != 0 {
+		t.Errorf("no code should be sent for invalid contacts, got %v", codes.codes)
+	}
+}
+
+// A contact already held by another account is rejected before any code is sent
+// (RequestContactBindCode) and again at confirmation (BindContact).
+func TestService_BindContact_Taken(t *testing.T) {
+	svc, _, codes, _ := newTestService()
+	ctx := context.Background()
+	// owner holds the email; binder is a phone-only account that wants it
+	_, _, _, _ = svc.Register(ctx, "13700137000", "taken@example.com", "password123", "O", RoleStudent)
+	binder, _, _, _ := svc.Register(ctx, "13800138000", "", "password123", "B", RoleStudent)
+
+	if err := svc.RequestContactBindCode(ctx, binder.ID, "taken@example.com"); !errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("request err = %v, want ErrEmailTaken", err)
+	}
+	if len(codes.codes) != 0 {
+		t.Errorf("no code should be sent for a taken contact, got %v", codes.codes)
+	}
+	if _, err := svc.BindContact(ctx, binder.ID, "taken@example.com", "123456"); !errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("bind err = %v, want ErrEmailTaken", err)
+	}
+}
+
+// Re-binding a contact the caller already owns is a harmless no-op, not a
+// self-conflict: ensureContactAvailable treats "held by me" as available.
+func TestService_BindContact_RebindOwn(t *testing.T) {
+	svc, _, codes, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "13800138000", "mine@example.com", "password123", "M", RoleStudent)
+
+	if err := svc.RequestContactBindCode(ctx, reg.ID, "mine@example.com"); err != nil {
+		t.Fatalf("request bind code for own email: %v", err)
+	}
+	code := codes.codes["mine@example.com"]
+	if code == "" {
+		t.Fatalf("bind code not sent: %v", codes.codes)
+	}
+	if _, err := svc.BindContact(ctx, reg.ID, "mine@example.com", code); err != nil {
+		t.Errorf("rebind own email: %v", err)
+	}
+}
+
+// A non-NotFound store error during the availability check propagates rather than
+// being mistaken for "available".
+func TestService_RequestContactBindCode_StoreError(t *testing.T) {
+	svc, store, _, _ := newTestService()
+	boom := errors.New("db down")
+	store.getEmail = func(string) (*User, error) { return nil, boom }
+
+	if err := svc.RequestContactBindCode(context.Background(), uuid.New(), "x@example.com"); !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want wrapped store error", err)
+	}
+}
+
 func TestNormalizeIdentifier(t *testing.T) {
 	cases := map[string]string{
 		"  Foo@Bar.COM ": "foo@bar.com",
