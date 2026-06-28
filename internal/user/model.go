@@ -45,6 +45,11 @@ type User struct {
 	Email        string    `json:"email,omitempty"`
 	PasswordHash string    `json:"-"` // never serialized
 	DisplayName  string    `json:"display_name"`
+	// AvatarURL is an opaque reference to the user's avatar. Nothing writes it
+	// yet; a storage backend (OSS is planned) will. Stored and returned as-is —
+	// the format (storage key vs. absolute URL) is deliberately left open until
+	// that backend lands. Empty when unset, so the client shows a default image.
+	AvatarURL string `json:"avatar_url"`
 	// Status is the account lifecycle state (active/disabled). Defaults to active
 	// at the database layer; a disabled account cannot log in or refresh.
 	Status UserStatus `json:"status"`

@@ -1358,6 +1358,13 @@ components:
         display_name:
           type: string
           example: Alice
+        avatar_url:
+          type: string
+          example: ""
+          description: >-
+            Opaque reference to the user's avatar; empty when unset (client shows
+            a default). Nothing writes it yet — a storage backend (OSS) is
+            planned, at which point the format is fixed.
         roles:
           type: array
           items:
@@ -1369,7 +1376,7 @@ components:
         updated_at:
           type: string
           format: date-time
-      required: [id, display_name, roles, created_at, updated_at]
+      required: [id, display_name, avatar_url, roles, created_at, updated_at]
 
     RegisterRequest:
       type: object

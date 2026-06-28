@@ -169,6 +169,7 @@ Validation failures (`400`) return the raw validator message in `error`.
   "phone": "13800138000",
   "email": "user@example.com",      // omitted if not set
   "display_name": "Alice",
+  "avatar_url": "",                 // empty until a storage backend (OSS) lands
   "roles": ["student", "teacher"],
   "created_at": "2026-06-26T10:00:00Z",
   "updated_at": "2026-06-26T10:00:00Z"
