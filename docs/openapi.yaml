@@ -249,12 +249,13 @@ paths:
   /api/v1/auth/password/forgot:
     post:
       tags: [Auth (public)]
-      summary: Request a password-reset code (SMS)
+      summary: Request a password-reset code
       operationId: forgotPassword
       description: |
-        Sends a one-time reset code by SMS to the phone (code lifetime 5 minutes,
-        `OTP_CODE_TTL`). Always returns 200 even for unknown phones, so it can't be
-        used to probe which accounts exist. Pair with `/auth/password/reset`.
+        Sends a one-time reset code to the identifier — SMS for a phone, email for
+        an email (code lifetime 5 minutes, `OTP_CODE_TTL`). Always returns 200 even
+        for unknown identifiers, so it can't be used to probe which accounts exist.
+        Pair with `/auth/password/reset`.
       security: []
       requestBody:
         required: true
@@ -262,11 +263,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [phone]
+              required: [identifier]
               properties:
-                phone:
+                identifier:
                   type: string
-                  description: The account's phone number.
+                  description: The account's phone or email.
                   example: "13800138000"
       responses:
         "200":
@@ -292,14 +293,14 @@ paths:
   /api/v1/auth/password/reset:
     post:
       tags: [Auth (public)]
-      summary: Reset password with phone + code
+      summary: Reset password with identifier + code
       operationId: resetPassword
       description: |
         Verifies the reset code sent by `/auth/password/forgot` and sets a new
         password. On success every existing session is revoked server-side, so the
         user must log in again with the new password. A wrong/expired code — or an
-        unknown phone — both return 400 with the same message, so the flow never
-        reveals which numbers are registered.
+        unknown identifier — both return 400 with the same message, so the flow
+        never reveals which identifiers are registered.
       security: []
       requestBody:
         required: true
@@ -307,10 +308,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [phone, code, new_password]
+              required: [identifier, code, new_password]
               properties:
-                phone:
+                identifier:
                   type: string
+                  description: The phone or email the code was sent to.
                   example: "13800138000"
                 code:
                   type: string
@@ -335,7 +337,7 @@ paths:
         "400":
           description: |
             Bad Request — validation error, or an invalid/expired reset code
-            (also returned for an unknown phone, to avoid account probing).
+            (also returned for an unknown identifier, to avoid account probing).
           content:
             application/json:
               schema:
@@ -1348,6 +1350,7 @@ components:
         phone:
           type: string
           example: "13800138000"
+          description: Omitted if the account has none (email-only account).
         email:
           type: string
           format: email
@@ -1366,22 +1369,26 @@ components:
         updated_at:
           type: string
           format: date-time
-      required: [id, phone, display_name, roles, created_at, updated_at]
+      required: [id, display_name, roles, created_at, updated_at]
 
     RegisterRequest:
       type: object
-      required: [phone, password, display_name, role]
+      required: [password, display_name, role]
+      description: >-
+        An account is identified by a phone, an email, or both. Each is
+        individually optional, but at least one must be present (the server
+        returns 400 "phone or email is required" otherwise).
       properties:
         phone:
           type: string
           minLength: 5
           maxLength: 20
-          description: Primary identifier.
+          description: Optional, but required if no email is given.
           example: "13800138000"
         email:
           type: string
           format: email
-          description: Optional.
+          description: Optional, but required if no phone is given.
           example: alice@example.com
         password:
           type: string
@@ -1737,6 +1744,7 @@ components:
         phone:
           type: string
           example: "13800138000"
+          description: Omitted if the account has none (email-only account).
         email:
           type: string
           format: email
@@ -1760,7 +1768,7 @@ components:
         created_at:
           type: string
           format: date-time
-      required: [id, phone, display_name, roles, status, created_at]
+      required: [id, display_name, roles, status, created_at]
 
     AdminUserListResponse:
       type: object

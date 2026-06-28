@@ -47,7 +47,7 @@ func (r *Repository) Create(ctx context.Context, u *User, role Role) error {
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING created_at, updated_at`
 
-	err = tx.QueryRow(ctx, insertUser, u.ID, u.Phone, nullable(u.Email), u.PasswordHash, u.DisplayName, role).
+	err = tx.QueryRow(ctx, insertUser, u.ID, nullable(u.Phone), nullable(u.Email), u.PasswordHash, u.DisplayName, role).
 		Scan(&u.CreatedAt, &u.UpdatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
@@ -210,16 +210,20 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 // getOne scans a single user row and then loads its roles.
 func (r *Repository) getOne(ctx context.Context, query string, arg any) (*User, error) {
 	var u User
-	var email *string          // email is nullable
+	var phone *string          // phone is nullable (email-only accounts)
+	var email *string          // email is nullable (phone-only accounts)
 	var lastActiveRole *string // NULL until the first token is issued
 	err := r.db.QueryRow(ctx, query, arg).Scan(
-		&u.ID, &u.Phone, &email, &u.PasswordHash, &u.DisplayName, &u.Status, &lastActiveRole, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &phone, &email, &u.PasswordHash, &u.DisplayName, &u.Status, &lastActiveRole, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query user: %w", err)
+	}
+	if phone != nil {
+		u.Phone = *phone
 	}
 	if email != nil {
 		u.Email = *email
@@ -297,8 +301,9 @@ func (r *Repository) SetLearningSettings(ctx context.Context, userID uuid.UUID, 
 	return nil
 }
 
-// nullable maps an empty string to a SQL NULL so optional columns (email) are
-// stored as NULL rather than "", keeping the partial unique index meaningful.
+// nullable maps an empty string to a SQL NULL so optional columns (phone, email)
+// are stored as NULL rather than "", keeping their partial unique indexes
+// meaningful and the "at least one identifier" CHECK accurate.
 func nullable(s string) *string {
 	if s == "" {
 		return nil

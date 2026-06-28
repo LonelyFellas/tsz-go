@@ -81,7 +81,11 @@ func TestHandler_Register(t *testing.T) {
 	}{
 		{"valid", `{"phone":"13800138000","email":"a@b.com","password":"password123","display_name":"Alice","role":"student"}`, http.StatusCreated},
 		{"valid no email", `{"phone":"13800138001","password":"password123","display_name":"Bob","role":"teacher"}`, http.StatusCreated},
-		{"missing phone", `{"email":"a@b.com","password":"password123","display_name":"Alice","role":"student"}`, http.StatusBadRequest},
+		{"valid email only", `{"email":"a@b.com","password":"password123","display_name":"Alice","role":"student"}`, http.StatusCreated},
+		{"missing phone and email", `{"password":"password123","display_name":"Alice","role":"student"}`, http.StatusBadRequest},
+		// phone is optional, but a supplied phone must still satisfy min length even
+		// when a valid email is present — omitempty must not disable the rule.
+		{"too-short phone with valid email", `{"phone":"12","email":"a@b.com","password":"password123","display_name":"Alice","role":"student"}`, http.StatusBadRequest},
 		{"invalid email", `{"phone":"13800138000","email":"not-an-email","password":"password123","display_name":"Alice","role":"student"}`, http.StatusBadRequest},
 		{"password too short", `{"phone":"13800138000","password":"short","display_name":"Alice","role":"student"}`, http.StatusBadRequest},
 		{"password too long", `{"phone":"13800138000","password":"` + strings.Repeat("x", 73) + `","display_name":"Alice","role":"student"}`, http.StatusBadRequest},
@@ -265,18 +269,18 @@ func TestHandler_ForgotAndResetPassword(t *testing.T) {
 	_ = doJSON(t, h.Register, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"U","role":"student"}`)
 
 	// forgot is always 200, even for an unknown phone (no account probing)
-	if w := doJSON(t, h.ForgotPassword, `{"phone":"13800138000"}`); w.Code != http.StatusOK {
+	if w := doJSON(t, h.ForgotPassword, `{"identifier":"13800138000"}`); w.Code != http.StatusOK {
 		t.Fatalf("forgot status = %d, want 200 (body: %s)", w.Code, w.Body)
 	}
-	if w := doJSON(t, h.ForgotPassword, `{"phone":"19999999999"}`); w.Code != http.StatusOK {
+	if w := doJSON(t, h.ForgotPassword, `{"identifier":"19999999999"}`); w.Code != http.StatusOK {
 		t.Fatalf("forgot unknown status = %d, want 200", w.Code)
 	}
 	if w := doJSON(t, h.ForgotPassword, `{}`); w.Code != http.StatusBadRequest {
-		t.Fatalf("forgot missing phone status = %d, want 400", w.Code)
+		t.Fatalf("forgot missing identifier status = %d, want 400", w.Code)
 	}
 
 	// the fake issues "123456"; resetting with it succeeds
-	if w := doJSON(t, h.ResetPassword, `{"phone":"13800138000","code":"123456","new_password":"newpassword456"}`); w.Code != http.StatusOK {
+	if w := doJSON(t, h.ResetPassword, `{"identifier":"13800138000","code":"123456","new_password":"newpassword456"}`); w.Code != http.StatusOK {
 		t.Fatalf("reset status = %d, want 200 (body: %s)", w.Code, w.Body)
 	}
 	// the new password now logs in, the old one does not
@@ -291,18 +295,18 @@ func TestHandler_ForgotAndResetPassword(t *testing.T) {
 func TestHandler_ResetPassword_Errors(t *testing.T) {
 	h, _, _, _, _ := newTestHandler()
 	_ = doJSON(t, h.Register, `{"phone":"13800138000","email":"re@b.com","password":"password123","display_name":"RE","role":"student"}`)
-	_ = doJSON(t, h.ForgotPassword, `{"phone":"13800138000"}`)
+	_ = doJSON(t, h.ForgotPassword, `{"identifier":"13800138000"}`)
 
 	// wrong code → 400
-	if w := doJSON(t, h.ResetPassword, `{"phone":"13800138000","code":"000000","new_password":"newpassword456"}`); w.Code != http.StatusBadRequest {
+	if w := doJSON(t, h.ResetPassword, `{"identifier":"13800138000","code":"000000","new_password":"newpassword456"}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("wrong-code status = %d, want 400 (body: %s)", w.Code, w.Body)
 	}
 	// short new password → 400 (binding)
-	if w := doJSON(t, h.ResetPassword, `{"phone":"13800138000","code":"123456","new_password":"short"}`); w.Code != http.StatusBadRequest {
+	if w := doJSON(t, h.ResetPassword, `{"identifier":"13800138000","code":"123456","new_password":"short"}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("short-password status = %d, want 400", w.Code)
 	}
 	// missing code → 400 (binding)
-	if w := doJSON(t, h.ResetPassword, `{"phone":"13800138000","new_password":"newpassword456"}`); w.Code != http.StatusBadRequest {
+	if w := doJSON(t, h.ResetPassword, `{"identifier":"13800138000","new_password":"newpassword456"}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("missing-code status = %d, want 400", w.Code)
 	}
 }
@@ -311,7 +315,7 @@ func TestHandler_ForgotPassword_RateLimited(t *testing.T) {
 	h, _, codes, _, _ := newTestHandler()
 	codes.reqFn = func(string, string) error { return otp.ErrRateLimited }
 
-	if w := doJSON(t, h.ForgotPassword, `{"phone":"13800138000"}`); w.Code != http.StatusTooManyRequests {
+	if w := doJSON(t, h.ForgotPassword, `{"identifier":"13800138000"}`); w.Code != http.StatusTooManyRequests {
 		t.Fatalf("forgot status = %d, want 429 (body: %s)", w.Code, w.Body)
 	}
 }

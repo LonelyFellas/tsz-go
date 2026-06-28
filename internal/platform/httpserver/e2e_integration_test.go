@@ -410,7 +410,7 @@ func TestE2E_PasswordReset(t *testing.T) {
 	_, refresh := loginTokens(t, r, phone, "password123")
 
 	// request a reset code (always 200), read it from the mock sender
-	if w := req(t, r, http.MethodPost, "/api/v1/auth/password/forgot", `{"phone":"`+phone+`"}`, ""); w.Code != http.StatusOK {
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/password/forgot", `{"identifier":"`+phone+`"}`, ""); w.Code != http.StatusOK {
 		t.Fatalf("forgot status = %d, body=%s", w.Code, w.Body)
 	}
 	code := sender.LastCode(phone)
@@ -419,7 +419,7 @@ func TestE2E_PasswordReset(t *testing.T) {
 	}
 
 	// reset with the code → 200
-	resetBody := `{"phone":"` + phone + `","code":"` + code + `","new_password":"newpassword456"}`
+	resetBody := `{"identifier":"` + phone + `","code":"` + code + `","new_password":"newpassword456"}`
 	if w := req(t, r, http.MethodPost, "/api/v1/auth/password/reset", resetBody, ""); w.Code != http.StatusOK {
 		t.Fatalf("reset status = %d, body=%s", w.Code, w.Body)
 	}
@@ -441,5 +441,84 @@ func TestE2E_PasswordReset(t *testing.T) {
 	// the reset code is single-use: replaying it → 400
 	if w := req(t, r, http.MethodPost, "/api/v1/auth/password/reset", resetBody, ""); w.Code != http.StatusBadRequest {
 		t.Fatalf("replayed reset code status = %d, want 400", w.Code)
+	}
+}
+
+// TestE2E_EmailOnlyRegistration exercises migration 000014 against the real DB:
+// an account may register with an email and no phone. This is the path the
+// migration unlocks (phone NULL, the partial unique index, and the
+// "phone or email present" CHECK), which the in-memory fake can't validate. It
+// then proves the account is fully usable email-side: email login works, and the
+// forgot-password code is delivered to and verified against the email.
+func TestE2E_EmailOnlyRegistration(t *testing.T) {
+	r, sender := buildRealRouter(t)
+	email := "e2e-eo-" + uuid.NewString() + "@example.com"
+
+	// register with no phone at all → 201 (would fail before 000014)
+	body := `{"email":"` + email + `","password":"password123","display_name":"EO","role":"student"}`
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/register", body, ""); w.Code != http.StatusCreated {
+		t.Fatalf("email-only register status = %d, body=%s", w.Code, w.Body)
+	}
+
+	// the account logs in by email
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login",
+		`{"identifier":"`+email+`","password":"password123"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("email login status = %d, body=%s", w.Code, w.Body)
+	}
+
+	// forgot-password over the email channel: the code is sent to the email and
+	// the reset succeeds, proving the identifier-based flow end to end.
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/password/forgot", `{"identifier":"`+email+`"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("forgot status = %d, body=%s", w.Code, w.Body)
+	}
+	code := sender.LastCode(email)
+	if code == "" {
+		t.Fatal("mock sender did not capture a reset code for the email")
+	}
+	resetBody := `{"identifier":"` + email + `","code":"` + code + `","new_password":"newpassword456"}`
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/password/reset", resetBody, ""); w.Code != http.StatusOK {
+		t.Fatalf("reset status = %d, body=%s", w.Code, w.Body)
+	}
+
+	// the new password (set via the email reset) logs in; the old one does not
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login",
+		`{"identifier":"`+email+`","password":"newpassword456"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("login with new password status = %d, want 200, body=%s", w.Code, w.Body)
+	}
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login",
+		`{"identifier":"`+email+`","password":"password123"}`, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("login with old password status = %d, want 401", w.Code)
+	}
+
+	// ---- account deletion for an email-only account ----
+	access, _ := loginTokens(t, r, email, "newpassword456")
+
+	// the phone channel is unavailable for an account with no phone → 400, and no
+	// code is sent. This is the deletionTarget guard that opened up once phone
+	// became optional.
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/account/deletion-code", `{"channel":"phone"}`, access); w.Code != http.StatusBadRequest {
+		t.Fatalf("phone-channel deletion-code status = %d, want 400 (no phone on file), body=%s", w.Code, w.Body)
+	}
+
+	// the email channel works: request a code, then confirm the deletion with it.
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/account/deletion-code", `{"channel":"email"}`, access); w.Code != http.StatusOK {
+		t.Fatalf("email-channel deletion-code status = %d, body=%s", w.Code, w.Body)
+	}
+	delCode := sender.LastCode(email)
+	if delCode == "" {
+		t.Fatal("mock sender did not capture a deletion code for the email")
+	}
+	if w := req(t, r, http.MethodDelete, "/api/v1/auth/account", `{"channel":"email","code":"`+delCode+`"}`, access); w.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204, body=%s", w.Code, w.Body)
+	}
+
+	// the account is gone: email login no longer works, and the email is free to reuse.
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login",
+		`{"identifier":"`+email+`","password":"newpassword456"}`, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("login after delete status = %d, want 401", w.Code)
+	}
+	reuse := `{"email":"` + email + `","password":"password123","display_name":"EO2","role":"student"}`
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/register", reuse, ""); w.Code != http.StatusCreated {
+		t.Fatalf("re-register with freed email status = %d, want 201, body=%s", w.Code, w.Body)
 	}
 }

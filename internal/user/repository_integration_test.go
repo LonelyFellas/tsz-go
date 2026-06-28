@@ -195,6 +195,53 @@ func TestRepository_OptionalEmail(t *testing.T) {
 	}
 }
 
+// TestRepository_RequiresAnIdentifier proves migration 000014's
+// users_phone_or_email_present CHECK: a row with neither phone nor email is
+// rejected by the database itself. The service guards this too
+// (ErrMissingIdentifier), but this is the last-line constraint and the fake has
+// no equivalent, so it can only be verified here. A CHECK violation (SQLSTATE
+// 23514) is not a unique violation, so it surfaces as a generic wrapped error,
+// not ErrPhoneTaken/ErrEmailTaken.
+func TestRepository_RequiresAnIdentifier(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+
+	u := &User{ID: uuid.New(), Phone: "", Email: "", PasswordHash: "h", DisplayName: "NONE"}
+	err := repo.Create(ctx, u, RoleStudent)
+	if err == nil {
+		t.Fatal("Create with neither phone nor email succeeded, want a CHECK violation")
+	}
+	if errors.Is(err, ErrPhoneTaken) || errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("err = %v, want a generic CHECK error (not a unique violation)", err)
+	}
+}
+
+// TestRepository_EmailOnly is the mirror of TestRepository_OptionalEmail for the
+// now-nullable phone: an account may have only an email, multiple such accounts
+// must not collide on the partial phone index, and the absent phone reads back
+// as "".
+func TestRepository_EmailOnly(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+
+	a := &User{ID: uuid.New(), Email: uniqueEmail(), PasswordHash: "h", DisplayName: "A"}
+	b := &User{ID: uuid.New(), Email: uniqueEmail(), PasswordHash: "h", DisplayName: "B"}
+	if err := repo.Create(ctx, a, RoleStudent); err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	if err := repo.Create(ctx, b, RoleStudent); err != nil {
+		t.Fatalf("create b (no phone should not collide): %v", err)
+	}
+
+	got, err := repo.GetByEmail(ctx, a.Email)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Phone != "" {
+		t.Errorf("phone = %q, want empty", got.Phone)
+	}
+}
+
 func TestRepository_DuplicatePhone(t *testing.T) {
 	repo := newTestRepo(t)
 	ctx := context.Background()

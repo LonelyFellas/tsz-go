@@ -131,6 +131,51 @@ func runStoreContract(t *testing.T, newStore func() Store) {
 		}
 	})
 
+	// Mirror of the above for phone, which became optional alongside email: two
+	// email-only accounts (no phone) must not collide. On the real DB this is the
+	// partial unique index from migration 000014; on the fake it is the empty-phone
+	// exemption in Create.
+	t.Run("empty phones do not conflict", func(t *testing.T) {
+		st := newStore()
+		a := mkUser()
+		a.Phone = ""
+		if err := st.Create(ctx, a, RoleStudent); err != nil {
+			t.Fatalf("Create a (no phone): %v", err)
+		}
+		b := mkUser()
+		b.Phone = ""
+		if err := st.Create(ctx, b, RoleStudent); err != nil {
+			t.Fatalf("Create b (no phone): %v — empty phone must not collide", err)
+		}
+	})
+
+	// An email-only account round-trips: the absent phone reads back as "" (not an
+	// error), exercising the nullable-phone scan path the same way an email-only row
+	// flows through the real DB's now-nullable phone column.
+	t.Run("email-only account round-trips", func(t *testing.T) {
+		st := newStore()
+		u := mkUser()
+		u.Phone = ""
+		if err := st.Create(ctx, u, RoleStudent); err != nil {
+			t.Fatalf("Create (no phone): %v", err)
+		}
+		for name, get := range map[string]func() (*User, error){
+			"by id":    func() (*User, error) { return st.GetByID(ctx, u.ID) },
+			"by email": func() (*User, error) { return st.GetByEmail(ctx, u.Email) },
+		} {
+			got, err := get()
+			if err != nil {
+				t.Fatalf("Get %s: %v", name, err)
+			}
+			if got.Phone != "" {
+				t.Errorf("Get %s: phone = %q, want empty for an email-only account", name, got.Phone)
+			}
+			if got.Email != u.Email || got.ID != u.ID {
+				t.Errorf("Get %s: identity mismatch: %+v", name, got)
+			}
+		}
+	})
+
 	t.Run("lookups are case-insensitive on email", func(t *testing.T) {
 		st := newStore()
 		u := mkUser()

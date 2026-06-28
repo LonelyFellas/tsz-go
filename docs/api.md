@@ -229,14 +229,19 @@ Liveness check. No auth.
 #### `POST /api/v1/auth/register`
 Create an account. Returns tokens (auto-login).
 
+An account is identified by a **phone, an email, or both** — at least one is
+required. Whichever is supplied can later be used to log in.
+
 **Body**
 | Field | Type | Rules |
 |---|---|---|
-| `phone` | string | required, 5–20 chars. Primary identifier. |
-| `email` | string | optional, valid email. |
+| `phone` | string | optional*, 5–20 chars. |
+| `email` | string | optional*, valid email. |
 | `password` | string | required, 8–72 chars. |
 | `display_name` | string | required, 1–50 chars. |
 | `role` | string | required, `student` or `teacher`. |
+
+\* `phone` and `email` are each optional, but **at least one must be present**.
 
 ```json
 {
@@ -249,7 +254,7 @@ Create an account. Returns tokens (auto-login).
 ```
 
 **201** → [Auth response](#auth-response)
-**400** validation error
+**400** validation error, or `phone or email is required` when both are omitted
 **409** `phone already registered` / `email already registered`
 
 ---
@@ -311,14 +316,14 @@ Login with identifier + one-time code.
 ---
 
 #### `POST /api/v1/auth/password/forgot`
-Request a password-reset code, sent by **SMS** to the phone. Code lifetime: **5 minutes** (`OTP_CODE_TTL`). Pair with `/auth/password/reset`.
+Request a password-reset code, sent to the identifier — **SMS** for a phone, **email** for an email. Code lifetime: **5 minutes** (`OTP_CODE_TTL`). Pair with `/auth/password/reset`.
 
-> Always returns **200**, even for unknown phones — so it can't be used to probe which accounts exist. Do not treat 200 as proof the account exists.
+> Always returns **200**, even for unknown identifiers — so it can't be used to probe which accounts exist. Do not treat 200 as proof the account exists.
 
 **Body**
 | Field | Type | Rules |
 |---|---|---|
-| `phone` | string | required. The account's phone number (5–20 chars). |
+| `identifier` | string | required. The account's phone **or** email. |
 
 **200**
 ```json
@@ -334,19 +339,19 @@ Verify the reset code and set a new password. On success **every existing sessio
 **Body**
 | Field | Type | Rules |
 |---|---|---|
-| `phone` | string | required. The phone the code was sent to. |
+| `identifier` | string | required. The phone or email the code was sent to. |
 | `code` | string | required. The code from `password/forgot`. |
 | `new_password` | string | required. 8–72 chars (bcrypt caps input at 72 bytes). |
 
 ```json
-{ "phone": "13800138000", "code": "123456", "new_password": "newpassword456" }
+{ "identifier": "13800138000", "code": "123456", "new_password": "newpassword456" }
 ```
 
 **200**
 ```json
 { "status": "reset" }
 ```
-**400** validation error, or `invalid or expired reset code` — wrong/expired code (also returned for an unknown phone, to avoid account probing).
+**400** validation error, or `invalid or expired reset code` — wrong/expired code (also returned for an unknown identifier, to avoid account probing).
 **403** `account disabled` — the account is disabled and cannot be reset into.
 
 ---

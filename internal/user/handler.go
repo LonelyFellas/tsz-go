@@ -84,8 +84,11 @@ func (h *Handler) clearRefreshCookie(c *gin.Context) {
 }
 
 type registerRequest struct {
-	Phone       string `json:"phone" binding:"required,min=5,max=20"`
-	Email       string `json:"email" binding:"omitempty,email"`          // optional
+	// Phone and email are each individually optional, but at least one must be
+	// present — the service enforces that (ErrMissingIdentifier) since gin's
+	// binding can't express "one of these two".
+	Phone       string `json:"phone" binding:"omitempty,min=5,max=20"`
+	Email       string `json:"email" binding:"omitempty,email"`
 	Password    string `json:"password" binding:"required,min=8,max=72"` // bcrypt caps at 72 bytes
 	DisplayName string `json:"display_name" binding:"required,min=1,max=50"`
 	Role        string `json:"role" binding:"required,oneof=student teacher"`
@@ -111,6 +114,9 @@ func (h *Handler) Register(c *gin.Context) {
 
 	u, access, refresh, err := h.svc.Register(c.Request.Context(), req.Phone, req.Email, req.Password, req.DisplayName, Role(req.Role))
 	switch {
+	case errors.Is(err, ErrMissingIdentifier):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "phone or email is required"})
+		return
 	case errors.Is(err, ErrPhoneTaken):
 		c.JSON(http.StatusConflict, gin.H{"error": "phone already registered"})
 		return
@@ -212,12 +218,13 @@ func (h *Handler) LoginCode(c *gin.Context) {
 }
 
 type forgotPasswordRequest struct {
-	Phone string `json:"phone" binding:"required,min=5,max=20"`
+	Identifier string `json:"identifier" binding:"required"` // phone or email
 }
 
-// ForgotPassword sends a one-time reset code by SMS to the phone. Always 200
-// (even for unknown phones) so it can't be used to probe which accounts exist;
-// 429 only when the per-target OTP rate limit is hit.
+// ForgotPassword sends a one-time reset code to the identifier (phone → SMS,
+// email → email). Always 200 (even for unknown identifiers) so it can't be used
+// to probe which accounts exist; 429 only when the per-target OTP rate limit is
+// hit.
 func (h *Handler) ForgotPassword(c *gin.Context) {
 	var req forgotPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -225,7 +232,7 @@ func (h *Handler) ForgotPassword(c *gin.Context) {
 		return
 	}
 
-	if err := h.svc.RequestPasswordReset(c.Request.Context(), req.Phone); err != nil {
+	if err := h.svc.RequestPasswordReset(c.Request.Context(), req.Identifier); err != nil {
 		if errors.Is(err, otp.ErrRateLimited) {
 			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many code requests, try again later"})
 			return
@@ -238,13 +245,13 @@ func (h *Handler) ForgotPassword(c *gin.Context) {
 }
 
 type resetPasswordRequest struct {
-	Phone       string `json:"phone" binding:"required,min=5,max=20"`
+	Identifier  string `json:"identifier" binding:"required"` // phone or email
 	Code        string `json:"code" binding:"required"`
 	NewPassword string `json:"new_password" binding:"required,min=8,max=72"` // bcrypt caps at 72 bytes
 }
 
 // ResetPassword verifies the reset code and sets a new password. A bad/expired
-// code (or an unknown phone) → 400; a disabled account → 403. On success the
+// code (or an unknown identifier) → 400; a disabled account → 403. On success the
 // user's other sessions are already revoked server-side, so they must log in
 // again with the new password.
 func (h *Handler) ResetPassword(c *gin.Context) {
@@ -254,7 +261,7 @@ func (h *Handler) ResetPassword(c *gin.Context) {
 		return
 	}
 
-	err := h.svc.ResetPassword(c.Request.Context(), req.Phone, req.Code, req.NewPassword)
+	err := h.svc.ResetPassword(c.Request.Context(), req.Identifier, req.Code, req.NewPassword)
 	switch {
 	case errors.Is(err, ErrInvalidResetCode):
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired reset code"})

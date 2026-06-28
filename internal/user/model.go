@@ -35,11 +35,13 @@ const (
 
 // User is the authentication identity. It is role-agnostic; the roles it holds
 // are loaded into Roles, and the role it is currently acting as travels in the
-// JWT rather than on the user record. Phone is the required primary identifier;
-// Email is optional. Either may be used to log in.
+// JWT rather than on the user record. An account is identified by a phone, an
+// email, or both — at least one is always present, and either may be used to log
+// in. Both fields are omitempty so an account that has only one doesn't serialize
+// the other as an empty string.
 type User struct {
 	ID           uuid.UUID `json:"id"`
-	Phone        string    `json:"phone"`
+	Phone        string    `json:"phone,omitempty"`
 	Email        string    `json:"email,omitempty"`
 	PasswordHash string    `json:"-"` // never serialized
 	DisplayName  string    `json:"display_name"`

@@ -80,6 +80,32 @@ func TestService_Register_OptionalEmail(t *testing.T) {
 	}
 }
 
+func TestService_Register_EmailOnly(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	u, access, refresh, err := svc.Register(context.Background(), "", "Only@Example.com", "password123", "EmailOnly", RoleStudent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u.Phone != "" {
+		t.Errorf("phone = %q, want empty", u.Phone)
+	}
+	if u.Email != "only@example.com" { // normalized to lower-case
+		t.Errorf("email = %q, want only@example.com", u.Email)
+	}
+	if access == "" || refresh == "" {
+		t.Error("expected access and refresh tokens for an email-only account")
+	}
+}
+
+func TestService_Register_MissingIdentifier(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	// neither phone nor email (whitespace-only collapses to empty after normalize)
+	_, _, _, err := svc.Register(context.Background(), "  ", "  ", "password123", "NoContact", RoleStudent)
+	if !errors.Is(err, ErrMissingIdentifier) {
+		t.Fatalf("err = %v, want ErrMissingIdentifier", err)
+	}
+}
+
 func TestService_Register_DuplicatePhone(t *testing.T) {
 	svc, _, _, _ := newTestService()
 	ctx := context.Background()
@@ -547,6 +573,82 @@ func TestService_DeleteAccount_EmailChannelUnavailable(t *testing.T) {
 	}
 	if err := svc.DeleteAccount(ctx, reg.ID, DeletionChannelEmail, "123456"); !errors.Is(err, ErrChannelUnavailable) {
 		t.Fatalf("delete err = %v, want ErrChannelUnavailable", err)
+	}
+}
+
+// The mirror of the above: an email-only account (no phone on file) cannot use
+// the phone deletion channel. This guards the path that opened up once phone
+// became optional — without the check the code would be "sent" to an empty target.
+func TestService_DeleteAccount_PhoneChannelUnavailable(t *testing.T) {
+	svc, _, codes, _ := newTestService()
+	ctx := context.Background()
+	reg, _, _, _ := svc.Register(ctx, "", "noPhone@example.com", "password123", "NOPHONE", RoleStudent)
+
+	if err := svc.RequestAccountDeletion(ctx, reg.ID, DeletionChannelPhone); !errors.Is(err, ErrChannelUnavailable) {
+		t.Fatalf("request err = %v, want ErrChannelUnavailable", err)
+	}
+	if len(codes.codes) != 0 {
+		t.Errorf("no code should have been sent, got %v", codes.codes)
+	}
+	if err := svc.DeleteAccount(ctx, reg.ID, DeletionChannelPhone, "123456"); !errors.Is(err, ErrChannelUnavailable) {
+		t.Fatalf("delete err = %v, want ErrChannelUnavailable", err)
+	}
+}
+
+// An email-only account can complete the forgot-password flow over email: the
+// reset code is delivered to (and verified against) the email, with no phone in
+// play.
+func TestService_ResetPassword_ViaEmail(t *testing.T) {
+	svc, _, codes, _ := newTestService()
+	ctx := context.Background()
+	_, _, _, _ = svc.Register(ctx, "", "reset@example.com", "password123", "REM", RoleStudent)
+
+	if err := svc.RequestPasswordReset(ctx, "Reset@Example.com"); err != nil {
+		t.Fatalf("request reset: %v", err)
+	}
+	code := codes.codes["reset@example.com"] // normalized target
+	if code == "" {
+		t.Fatalf("reset code not recorded for email target: %v", codes.codes)
+	}
+	if err := svc.ResetPassword(ctx, "reset@example.com", code, "newpassword456"); err != nil {
+		t.Fatalf("reset password: %v", err)
+	}
+	// the new password logs in by email; the old one is dead.
+	if _, _, _, err := svc.LoginPassword(ctx, "reset@example.com", "newpassword456"); err != nil {
+		t.Errorf("login with new password: %v", err)
+	}
+	if _, _, _, err := svc.LoginPassword(ctx, "reset@example.com", "password123"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Errorf("old password should be rejected, got %v", err)
+	}
+}
+
+// A reset code is bound to the target it was sent to: a code delivered to the
+// phone cannot be used to reset by passing the email as the identifier (and vice
+// versa), because Verify checks the code against the normalized target. This
+// guards the identifier-based flow against a channel-mixup that would let a code
+// from a weaker channel reset through another.
+func TestService_ResetPassword_CrossChannelRejected(t *testing.T) {
+	svc, _, codes, _ := newTestService()
+	ctx := context.Background()
+	_, _, _, _ = svc.Register(ctx, "13800138000", "cc@example.com", "password123", "CC", RoleStudent)
+
+	// code is requested for (and recorded against) the phone target
+	if err := svc.RequestPasswordReset(ctx, "13800138000"); err != nil {
+		t.Fatalf("request reset: %v", err)
+	}
+	code := codes.codes["13800138000"]
+	if code == "" {
+		t.Fatalf("reset code not recorded for phone target: %v", codes.codes)
+	}
+
+	// using that code but resetting via the email identifier must fail: the email
+	// target has no such code.
+	if err := svc.ResetPassword(ctx, "cc@example.com", code, "newpassword456"); !errors.Is(err, ErrInvalidResetCode) {
+		t.Fatalf("cross-channel reset err = %v, want ErrInvalidResetCode", err)
+	}
+	// the password is unchanged: the original still logs in.
+	if _, _, _, err := svc.LoginPassword(ctx, "13800138000", "password123"); err != nil {
+		t.Errorf("original password should still work: %v", err)
 	}
 }
 

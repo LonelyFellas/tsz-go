@@ -40,7 +40,7 @@ func (f *fakeStore) Create(_ context.Context, u *User, role Role) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, existing := range f.byID {
-		if existing.Phone == u.Phone {
+		if u.Phone != "" && existing.Phone == u.Phone {
 			return ErrPhoneTaken
 		}
 		if u.Email != "" && strings.EqualFold(existing.Email, u.Email) {
