@@ -216,6 +216,77 @@ func TestE2E_AccountDeletion(t *testing.T) {
 	}
 }
 
+// TestE2E_EditProfile drives the edit-profile screen end to end against the real
+// DB: renaming the display name (PATCH /me) and binding a new contact. It is the
+// only test that exercises migration 000016 — persisting a code with purpose
+// 'contact_bind' must not violate the verification_codes CHECK (the in-memory
+// fake does not enforce it). It also proves the bound email is fully usable
+// (login works) and that the bind-code uniqueness pre-check fires against a value
+// already held by another account.
+func TestE2E_EditProfile(t *testing.T) {
+	r, sender := buildRealRouter(t)
+	phone := fmt.Sprintf("1%010d", time.Now().UnixNano()%1e10)
+
+	// register a phone-only account (no email yet — this is the "通过手机号注册" case
+	// whose edit screen binds an email), then log in.
+	body := `{"phone":"` + phone + `","password":"password123","display_name":"Old","role":"student"}`
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/register", body, ""); w.Code != http.StatusCreated {
+		t.Fatalf("register status = %d, body=%s", w.Code, w.Body)
+	}
+	access, _ := loginTokens(t, r, phone, "password123")
+
+	// ---- rename (PATCH /me) ----
+	if w := req(t, r, http.MethodPatch, "/api/v1/me", `{"display_name":"New Name"}`, access); w.Code != http.StatusOK {
+		t.Fatalf("patch profile status = %d, body=%s", w.Code, w.Body)
+	}
+	if w := req(t, r, http.MethodGet, "/api/v1/me", "", access); !bytes.Contains(w.Body.Bytes(), []byte(`"display_name":"New Name"`)) {
+		t.Errorf("me did not reflect the renamed display name: %s", w.Body)
+	}
+
+	// ---- bind a new email ----
+	email := "e2e-bind-" + uuid.NewString() + "@example.com"
+
+	// these endpoints require auth → 401 without a token
+	if w := req(t, r, http.MethodPost, "/api/v1/me/contact/bind-code", `{"contact":"`+email+`"}`, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth bind-code status = %d, want 401", w.Code)
+	}
+
+	// request a bind code to the NEW email, read it from the mock sender
+	if w := req(t, r, http.MethodPost, "/api/v1/me/contact/bind-code", `{"contact":"`+email+`"}`, access); w.Code != http.StatusOK {
+		t.Fatalf("bind-code status = %d, body=%s", w.Code, w.Body)
+	}
+	code := sender.LastCode(email)
+	if code == "" {
+		t.Fatal("mock sender did not capture a bind code for the new email")
+	}
+
+	// a wrong code does not bind → 400
+	if w := req(t, r, http.MethodPost, "/api/v1/me/contact/bind", `{"contact":"`+email+`","code":"000000"}`, access); w.Code != http.StatusBadRequest {
+		t.Fatalf("wrong-code bind status = %d, want 400, body=%s", w.Code, w.Body)
+	}
+
+	// the real code binds the email → 200
+	if w := req(t, r, http.MethodPost, "/api/v1/me/contact/bind", `{"contact":"`+email+`","code":"`+code+`"}`, access); w.Code != http.StatusOK {
+		t.Fatalf("bind status = %d, want 200, body=%s", w.Code, w.Body)
+	}
+
+	// the bound email is now a usable login identifier
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/login", `{"identifier":"`+email+`","password":"password123"}`, ""); w.Code != http.StatusOK {
+		t.Fatalf("login by bound email status = %d, want 200, body=%s", w.Code, w.Body)
+	}
+
+	// ---- uniqueness: a contact held by another account is rejected (no code sent) ----
+	otherPhone := fmt.Sprintf("1%010d", (time.Now().UnixNano()+1)%1e10)
+	otherEmail := "e2e-other-" + uuid.NewString() + "@example.com"
+	reg2 := `{"phone":"` + otherPhone + `","email":"` + otherEmail + `","password":"password123","display_name":"O","role":"student"}`
+	if w := req(t, r, http.MethodPost, "/api/v1/auth/register", reg2, ""); w.Code != http.StatusCreated {
+		t.Fatalf("register other status = %d, body=%s", w.Code, w.Body)
+	}
+	if w := req(t, r, http.MethodPost, "/api/v1/me/contact/bind-code", `{"contact":"`+otherEmail+`"}`, access); w.Code != http.StatusConflict {
+		t.Fatalf("bind-code for a taken email status = %d, want 409, body=%s", w.Code, w.Body)
+	}
+}
+
 func req(t *testing.T, r http.Handler, method, path, body, bearer string) *httptest.ResponseRecorder {
 	t.Helper()
 	var rdr *bytes.Buffer

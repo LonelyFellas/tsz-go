@@ -130,6 +130,57 @@ func (r *Repository) SetPassword(ctx context.Context, userID uuid.UUID, password
 	return nil
 }
 
+// SetDisplayName overwrites a user's display name (the edit-profile "昵称"). The
+// caller trims/validates first. Returns ErrNotFound if no user has the given ID,
+// so a stale token gets a definite signal rather than a silent no-op.
+func (r *Repository) SetDisplayName(ctx context.Context, userID uuid.UUID, displayName string) error {
+	ct, err := r.db.Exec(ctx,
+		`UPDATE users SET display_name = $2, updated_at = now() WHERE id = $1`,
+		userID, displayName)
+	if err != nil {
+		return fmt.Errorf("set display name: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetContact writes a phone or email (chosen by channel) onto the user, used by
+// the bind/change-contact flow. The value is stored as-is (the service
+// normalizes it); a value already held by another account violates the partial
+// unique index and surfaces as ErrPhoneTaken/ErrEmailTaken. Returns ErrNotFound
+// for a missing user. The channel is an internal constant, never user input, so
+// interpolating the column name is safe.
+func (r *Repository) SetContact(ctx context.Context, userID uuid.UUID, channel, value string) error {
+	var column string
+	switch channel {
+	case ContactChannelEmail:
+		column = "email"
+	case ContactChannelPhone:
+		column = "phone"
+	default:
+		return ErrInvalidContact
+	}
+
+	q := fmt.Sprintf(`UPDATE users SET %s = $2, updated_at = now() WHERE id = $1`, column)
+	ct, err := r.db.Exec(ctx, q, userID, value)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+		if channel == ContactChannelEmail {
+			return ErrEmailTaken
+		}
+		return ErrPhoneTaken
+	}
+	if err != nil {
+		return fmt.Errorf("set contact: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Delete removes a user row. Every table that references users(id) does so with
 // ON DELETE CASCADE (user_roles, student_profiles, teacher_profiles,
 // refresh_tokens), so this one statement also clears the user's roles, profiles

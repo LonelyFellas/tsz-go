@@ -422,6 +422,152 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
               example: { error: "user not found" }
+    patch:
+      tags: [User]
+      summary: Edit profile (display name)
+      operationId: updateProfile
+      description: |
+        Edits the authenticated user's profile. Today this updates only the
+        display name (the "昵称" on the edit-profile screen); avatar upload lands
+        with the OSS storage backend. Returns the refreshed user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfileRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          description: |
+            Bad Request — validation error, or the name is blank after trimming.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "display name cannot be blank" }
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "404":
+          description: Not Found — the account no longer exists (stale token).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "user not found" }
+
+  /api/v1/me/contact/bind-code:
+    post:
+      tags: [User]
+      summary: Send a code to a new contact to bind/change
+      operationId: requestContactBindCode
+      description: |
+        Sends a one-time code (lifetime 5 minutes, `OTP_CODE_TTL`) to a NEW phone
+        or email the user wants to bind or change. Unlike send-code / forgot /
+        deletion-code, the code goes to the value in the request — not a contact on
+        file — so confirming it proves control of the new contact. The contact's
+        shape picks the channel (an "@" → email). The value is validated and
+        checked for availability before anything is sent. Pair with
+        `POST /me/contact/bind`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactBindCodeRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: sent
+        "400":
+          description: Bad Request — `invalid contact` (not a valid email or phone).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "invalid contact" }
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          description: |
+            Conflict — the contact already belongs to another account (nothing is
+            sent). This authenticated flow deliberately reveals the conflict so the
+            user can pick a different value.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "email already registered" }
+        "429":
+          description: |
+            Too Many Requests — per-target rate limit hit (resend cooldown
+            `OTP_RESEND_COOLDOWN`, or daily cap `OTP_DAILY_LIMIT`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "too many code requests, try again later" }
+
+  /api/v1/me/contact/bind:
+    post:
+      tags: [User]
+      summary: Confirm and write a bound/changed contact
+      operationId: bindContact
+      description: |
+        Verifies the code from `bind-code` and writes the new phone/email onto the
+        account — binding a missing contact or replacing an existing one.
+        Availability is re-checked before the code is consumed; the unique index is
+        the final guard against a concurrent bind. Returns the refreshed user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactBindRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          description: |
+            Bad Request — validation error, `invalid contact`, or an
+            invalid/expired verification code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "invalid or expired verification code" }
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          description: Conflict — the contact is taken by another account (incl. a concurrent bind).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "phone already registered" }
+        "404":
+          description: Not Found — the account no longer exists (stale token).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "user not found" }
 
   /api/v1/me/learning-settings:
     put:
@@ -1550,6 +1696,49 @@ components:
           type: boolean
           description: Server-derived — true once learning_settings is set. Clients read this rather than re-deriving from null.
       required: [user, active_role, onboarded]
+
+    UpdateProfileRequest:
+      type: object
+      description: edit-profile payload. Today only the display name is editable.
+      required: [display_name]
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 50
+          example: "新昵称"
+
+    ContactBindCodeRequest:
+      type: object
+      description: |
+        bind-code payload — the NEW phone or email to bind. The "@" in the value
+        decides the channel (email vs SMS).
+      required: [contact]
+      properties:
+        contact:
+          type: string
+          description: A valid email, or a 5–20 char phone.
+          example: "newuser@example.com"
+
+    ContactBindRequest:
+      type: object
+      description: bind payload — the new contact plus the confirmation code.
+      required: [contact, code]
+      properties:
+        contact:
+          type: string
+          example: "newuser@example.com"
+        code:
+          type: string
+          example: "123456"
+
+    UserResponse:
+      type: object
+      description: Returned by edit-profile / contact-bind — the refreshed user.
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+      required: [user]
 
     # ── Admin schemas ──────────────────────────────────────────────────
     AdminLevel:

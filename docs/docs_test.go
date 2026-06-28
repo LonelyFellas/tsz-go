@@ -43,6 +43,8 @@ func TestOpenAPISpecEmbedded(t *testing.T) {
 		"/api/v1/auth/refresh",
 		"/api/v1/auth/logout",
 		"/api/v1/me",
+		"/api/v1/me/contact/bind-code",
+		"/api/v1/me/contact/bind",
 		"/api/v1/auth/logout-all",
 		"/api/v1/auth/switch-role",
 		"/api/v1/auth/roles",

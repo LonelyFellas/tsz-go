@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
 
 	"github.com/google/uuid"
@@ -45,6 +46,27 @@ var (
 	// nor email. The handler validates this first, so it is a defensive guard for
 	// direct service callers (tests).
 	ErrInvalidChannel = errors.New("invalid verification channel")
+	// ErrInvalidDisplayName is returned by UpdateDisplayName when the new name is
+	// blank after trimming (whitespace-only). The handler's binding enforces the
+	// 1–50 length on the raw value; this catches the trim-to-empty case it can't.
+	ErrInvalidDisplayName = errors.New("display name cannot be blank")
+	// ErrInvalidContact is returned when the value to bind is neither a valid email
+	// nor a plausible phone number. The contact's shape (an "@" → email) decides
+	// which it is, so a single field can carry either.
+	ErrInvalidContact = errors.New("invalid contact")
+	// ErrInvalidBindCode is returned by BindContact when the submitted code is
+	// wrong, expired, already used, or never issued. Like the other code errors it
+	// stays undifferentiated.
+	ErrInvalidBindCode = errors.New("invalid or expired verification code")
+)
+
+// Contact channels a bind can target. Unlike the deletion channels (which the
+// client picks), the bind channel is derived from the contact value's shape, so
+// these are internal: the service classifies, the repository writes the matching
+// column.
+const (
+	ContactChannelPhone = "phone"
+	ContactChannelEmail = "email"
 )
 
 // Verification channels a self-service account deletion can be confirmed over.
@@ -62,6 +84,7 @@ const (
 	codePurposeLogin           = "login"
 	codePurposePasswordReset   = "password_reset"
 	codePurposeAccountDeletion = "account_deletion"
+	codePurposeContactBind     = "contact_bind"
 )
 
 // Store is the persistence behavior the Service depends on. Defining it as an
@@ -78,6 +101,13 @@ type Store interface {
 	GetLearningSettings(ctx context.Context, userID uuid.UUID) (*LearningSettings, error)
 	SetLearningSettings(ctx context.Context, userID uuid.UUID, s *LearningSettings) error
 	SetPassword(ctx context.Context, userID uuid.UUID, passwordHash string) error
+	// SetDisplayName overwrites a user's display name. Returns ErrNotFound if no
+	// user has the given ID.
+	SetDisplayName(ctx context.Context, userID uuid.UUID, displayName string) error
+	// SetContact writes a phone or email (chosen by channel) onto the user. It
+	// returns ErrPhoneTaken/ErrEmailTaken if the value already belongs to another
+	// account (the partial unique indexes), and ErrNotFound if no user has the ID.
+	SetContact(ctx context.Context, userID uuid.UUID, channel, value string) error
 	// Delete removes a user and (via ON DELETE CASCADE) every row that hangs off
 	// them: roles, role profiles, refresh tokens. Returns ErrNotFound if no user
 	// has the given ID.
@@ -438,6 +468,111 @@ func (s *Service) SetLearningSettings(ctx context.Context, userID uuid.UUID, lev
 		return nil, err
 	}
 	return ls, nil
+}
+
+// UpdateDisplayName changes the authenticated user's display name (the "昵称" on
+// the edit-profile screen). The name is trimmed; a blank result is rejected with
+// ErrInvalidDisplayName. Returns the refreshed user on success, or ErrNotFound if
+// the account no longer exists (stale token).
+func (s *Service) UpdateDisplayName(ctx context.Context, userID uuid.UUID, displayName string) (*User, error) {
+	name := strings.TrimSpace(displayName)
+	if name == "" {
+		return nil, ErrInvalidDisplayName
+	}
+	if err := s.repo.SetDisplayName(ctx, userID, name); err != nil {
+		return nil, err // includes ErrNotFound
+	}
+	return s.repo.GetByID(ctx, userID)
+}
+
+// RequestContactBindCode sends a one-time code to a NEW contact the user wants to
+// attach (phone → SMS, email → email). Unlike the login/reset/deletion codes —
+// which go to a contact already on file — this code goes to the value in the
+// request, so verifying it later proves the user controls that new contact. The
+// contact is validated and checked for availability first, so a malformed value
+// (ErrInvalidContact) or one already taken by another account
+// (ErrPhoneTaken/ErrEmailTaken) returns without sending anything.
+func (s *Service) RequestContactBindCode(ctx context.Context, userID uuid.UUID, contact string) error {
+	channel, normalized, err := classifyContact(contact)
+	if err != nil {
+		return err
+	}
+	if err := s.ensureContactAvailable(ctx, userID, channel, normalized); err != nil {
+		return err
+	}
+	return s.codes.RequestCode(ctx, normalized, codePurposeContactBind)
+}
+
+// BindContact verifies the code sent by RequestContactBindCode and, on success,
+// writes the new phone/email onto the user — binding a missing contact or
+// replacing an existing one. Availability is re-checked before the code is
+// consumed (so a conflict doesn't waste the code), and the unique index is the
+// final guard against a concurrent bind of the same value (surfaces as
+// ErrPhoneTaken/ErrEmailTaken). Returns the refreshed user on success.
+func (s *Service) BindContact(ctx context.Context, userID uuid.UUID, contact, code string) (*User, error) {
+	channel, normalized, err := classifyContact(contact)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.ensureContactAvailable(ctx, userID, channel, normalized); err != nil {
+		return nil, err
+	}
+	if err := s.codes.Verify(ctx, normalized, codePurposeContactBind, code); err != nil {
+		return nil, ErrInvalidBindCode
+	}
+	if err := s.repo.SetContact(ctx, userID, channel, normalized); err != nil {
+		return nil, err // includes ErrPhoneTaken/ErrEmailTaken (race) and ErrNotFound
+	}
+	return s.repo.GetByID(ctx, userID)
+}
+
+// ensureContactAvailable reports whether normalized (an email or phone, per
+// channel) is free to bind: free if no account holds it, or if the only holder is
+// the caller (re-binding one's own contact is a harmless no-op). A value held by
+// another account returns ErrEmailTaken/ErrPhoneTaken.
+func (s *Service) ensureContactAvailable(ctx context.Context, userID uuid.UUID, channel, normalized string) error {
+	var existing *User
+	var err error
+	switch channel {
+	case ContactChannelEmail:
+		existing, err = s.repo.GetByEmail(ctx, normalized)
+	case ContactChannelPhone:
+		existing, err = s.repo.GetByPhone(ctx, normalized)
+	default:
+		return ErrInvalidContact
+	}
+	if errors.Is(err, ErrNotFound) {
+		return nil // nobody holds it
+	}
+	if err != nil {
+		return err
+	}
+	if existing.ID == userID {
+		return nil // already mine
+	}
+	if channel == ContactChannelEmail {
+		return ErrEmailTaken
+	}
+	return ErrPhoneTaken
+}
+
+// classifyContact decides whether a contact value is an email or a phone (an "@"
+// means email) and returns the channel plus its normalized form. Validation
+// mirrors registration: a valid email address, or a 5–20 char phone.
+func classifyContact(contact string) (channel, normalized string, err error) {
+	if isEmail(contact) {
+		email := normalizeEmail(contact)
+		addr, perr := mail.ParseAddress(email)
+		if perr != nil || addr.Address != email {
+			return "", "", ErrInvalidContact
+		}
+		return ContactChannelEmail, email, nil
+	}
+	phone := normalizePhone(contact)
+	if len(phone) < 5 || len(phone) > 20 {
+		return "", "", ErrInvalidContact
+	}
+	return ContactChannelPhone, phone, nil
 }
 
 // issue returns the user together with a fresh access + refresh token pair. The

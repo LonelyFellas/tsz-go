@@ -168,6 +168,52 @@ func (f *fakeStore) SetPassword(_ context.Context, userID uuid.UUID, passwordHas
 	return nil
 }
 
+func (f *fakeStore) SetDisplayName(_ context.Context, userID uuid.UUID, displayName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.byID[userID]
+	if !ok {
+		return ErrNotFound
+	}
+	u.DisplayName = displayName
+	return nil
+}
+
+func (f *fakeStore) SetContact(_ context.Context, userID uuid.UUID, channel, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.byID[userID]
+	if !ok {
+		return ErrNotFound
+	}
+	// Mirror the partial unique indexes: a value already held by ANOTHER account
+	// collides (case-insensitive for email, exact for phone).
+	for id, other := range f.byID {
+		if id == userID {
+			continue
+		}
+		switch channel {
+		case ContactChannelEmail:
+			if other.Email != "" && strings.EqualFold(other.Email, value) {
+				return ErrEmailTaken
+			}
+		case ContactChannelPhone:
+			if other.Phone != "" && other.Phone == value {
+				return ErrPhoneTaken
+			}
+		}
+	}
+	switch channel {
+	case ContactChannelEmail:
+		u.Email = value
+	case ContactChannelPhone:
+		u.Phone = value
+	default:
+		return ErrInvalidContact
+	}
+	return nil
+}
+
 func (f *fakeStore) Delete(_ context.Context, userID uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

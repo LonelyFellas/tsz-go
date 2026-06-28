@@ -105,6 +105,13 @@ func NewRouter(deps Deps) *gin.Engine {
 		authed.Use(AuthRequired(deps.TokenManager))
 		{
 			authed.GET("/me", deps.UserHandler.Me)
+			// Edit profile (the "编辑资料" screen): change the display name now,
+			// avatar once the OSS backend lands.
+			authed.PATCH("/me", deps.UserHandler.UpdateProfile)
+			// Bind/change a contact: send a code to the NEW phone/email, then confirm
+			// it to write the contact onto the account.
+			authed.POST("/me/contact/bind-code", deps.UserHandler.RequestContactBindCode)
+			authed.POST("/me/contact/bind", deps.UserHandler.BindContact)
 			// Set the learner's CEFR level + English variant (onboarding & settings).
 			authed.PUT("/me/learning-settings", deps.UserHandler.UpdateLearningSettings)
 			// Revoke every refresh token the user holds (logout everywhere).

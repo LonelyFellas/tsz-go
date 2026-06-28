@@ -850,6 +850,132 @@ func TestHandler_UpdateLearningSettings(t *testing.T) {
 	})
 }
 
+func TestHandler_UpdateProfile(t *testing.T) {
+	h, _, _, _, _ := newTestHandler()
+	userID := registerAndGetUserID(t, h, `{"phone":"13800138000","email":"u@b.com","password":"password123","display_name":"Old","role":"student"}`)
+
+	t.Run("200 updates display name", func(t *testing.T) {
+		w := doJSONAuthed(t, h.UpdateProfile, `{"display_name":"New Name"}`, userID)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body)
+		}
+		user, _ := decode(t, w)["user"].(map[string]any)
+		if user["display_name"] != "New Name" {
+			t.Errorf("display_name = %v, want 'New Name'", user["display_name"])
+		}
+	})
+
+	t.Run("400 missing display name", func(t *testing.T) {
+		if w := doJSONAuthed(t, h.UpdateProfile, `{}`, userID); w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("400 too long", func(t *testing.T) {
+		body := `{"display_name":"` + strings.Repeat("x", 51) + `"}`
+		if w := doJSONAuthed(t, h.UpdateProfile, body, userID); w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	// passes the binding min=1 (3 chars) but is blank after trimming → service 400
+	t.Run("400 whitespace-only", func(t *testing.T) {
+		if w := doJSONAuthed(t, h.UpdateProfile, `{"display_name":"   "}`, userID); w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body)
+		}
+	})
+
+	t.Run("404 stale token", func(t *testing.T) {
+		if w := doJSONAuthed(t, h.UpdateProfile, `{"display_name":"X"}`, uuid.New()); w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", w.Code)
+		}
+	})
+}
+
+func TestHandler_ContactBind(t *testing.T) {
+	h, _, _, _, _ := newTestHandler()
+	// a phone-only account that will bind an email
+	userID := registerAndGetUserID(t, h, `{"phone":"13800138000","password":"password123","display_name":"P","role":"student"}`)
+
+	t.Run("400 invalid contact", func(t *testing.T) {
+		if w := doJSONAuthed(t, h.RequestContactBindCode, `{"contact":"bad"}`, userID); w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body)
+		}
+	})
+
+	t.Run("400 missing contact", func(t *testing.T) {
+		if w := doJSONAuthed(t, h.RequestContactBindCode, `{}`, userID); w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("409 email taken by another account", func(t *testing.T) {
+		_ = registerAndGetUserID(t, h, `{"phone":"13900139000","email":"taken@b.com","password":"password123","display_name":"O","role":"student"}`)
+		if w := doJSONAuthed(t, h.RequestContactBindCode, `{"contact":"taken@b.com"}`, userID); w.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 (body: %s)", w.Code, w.Body)
+		}
+	})
+
+	t.Run("409 phone taken by another account", func(t *testing.T) {
+		_ = registerAndGetUserID(t, h, `{"phone":"13911111111","password":"password123","display_name":"PO","role":"student"}`)
+		if w := doJSONAuthed(t, h.RequestContactBindCode, `{"contact":"13911111111"}`, userID); w.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 (body: %s)", w.Code, w.Body)
+		}
+	})
+
+	t.Run("409 taken at bind step", func(t *testing.T) {
+		_ = registerAndGetUserID(t, h, `{"phone":"13922222222","email":"taken2@b.com","password":"password123","display_name":"O2","role":"student"}`)
+		// the conflict is caught before the code is even checked
+		if w := doJSONAuthed(t, h.BindContact, `{"contact":"taken2@b.com","code":"123456"}`, userID); w.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 (body: %s)", w.Code, w.Body)
+		}
+	})
+
+	t.Run("404 stale token at bind step", func(t *testing.T) {
+		stale := uuid.New()
+		// request a code so Verify passes; SetContact then 404s on the missing user
+		if w := doJSONAuthed(t, h.RequestContactBindCode, `{"contact":"stale@b.com"}`, stale); w.Code != http.StatusOK {
+			t.Fatalf("bind-code status = %d, want 200 (body: %s)", w.Code, w.Body)
+		}
+		if w := doJSONAuthed(t, h.BindContact, `{"contact":"stale@b.com","code":"123456"}`, stale); w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (body: %s)", w.Code, w.Body)
+		}
+	})
+
+	t.Run("full bind flow", func(t *testing.T) {
+		// request a code for the new email (the fake "sends" 123456) → 200
+		if w := doJSONAuthed(t, h.RequestContactBindCode, `{"contact":"new@b.com"}`, userID); w.Code != http.StatusOK {
+			t.Fatalf("bind-code status = %d, want 200 (body: %s)", w.Code, w.Body)
+		}
+		// wrong code → 400
+		if w := doJSONAuthed(t, h.BindContact, `{"contact":"new@b.com","code":"000000"}`, userID); w.Code != http.StatusBadRequest {
+			t.Fatalf("wrong-code status = %d, want 400", w.Code)
+		}
+		// missing code → 400 (binding)
+		if w := doJSONAuthed(t, h.BindContact, `{"contact":"new@b.com"}`, userID); w.Code != http.StatusBadRequest {
+			t.Fatalf("missing-code status = %d, want 400", w.Code)
+		}
+		// correct code → 200 and the user now carries the email
+		w := doJSONAuthed(t, h.BindContact, `{"contact":"new@b.com","code":"123456"}`, userID)
+		if w.Code != http.StatusOK {
+			t.Fatalf("bind status = %d, want 200 (body: %s)", w.Code, w.Body)
+		}
+		user, _ := decode(t, w)["user"].(map[string]any)
+		if user["email"] != "new@b.com" {
+			t.Errorf("email = %v, want new@b.com", user["email"])
+		}
+	})
+
+	t.Run("429 rate limited", func(t *testing.T) {
+		h, _, codes, _, _ := newTestHandler()
+		id := registerAndGetUserID(t, h, `{"phone":"13800138000","password":"password123","display_name":"R","role":"student"}`)
+		codes.reqFn = func(string, string) error { return otp.ErrRateLimited }
+		if w := doJSONAuthed(t, h.RequestContactBindCode, `{"contact":"r@b.com"}`, id); w.Code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want 429 (body: %s)", w.Code, w.Body)
+		}
+	})
+}
+
 // Login must reject a disabled account with 403 account disabled, for both
 // password and code login.
 func TestHandler_Login_Disabled(t *testing.T) {
