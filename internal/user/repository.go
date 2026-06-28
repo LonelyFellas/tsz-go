@@ -188,21 +188,21 @@ func (r *Repository) HasRole(ctx context.Context, userID uuid.UUID, role Role) (
 
 func (r *Repository) GetByEmail(ctx context.Context, email string) (*User, error) {
 	const q = `
-		SELECT id, phone, email, password_hash, display_name, status, last_active_role, created_at, updated_at
+		SELECT id, phone, email, password_hash, display_name, avatar_url, status, last_active_role, created_at, updated_at
 		FROM users WHERE lower(email) = lower($1)`
 	return r.getOne(ctx, q, email)
 }
 
 func (r *Repository) GetByPhone(ctx context.Context, phone string) (*User, error) {
 	const q = `
-		SELECT id, phone, email, password_hash, display_name, status, last_active_role, created_at, updated_at
+		SELECT id, phone, email, password_hash, display_name, avatar_url, status, last_active_role, created_at, updated_at
 		FROM users WHERE phone = $1`
 	return r.getOne(ctx, q, phone)
 }
 
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 	const q = `
-		SELECT id, phone, email, password_hash, display_name, status, last_active_role, created_at, updated_at
+		SELECT id, phone, email, password_hash, display_name, avatar_url, status, last_active_role, created_at, updated_at
 		FROM users WHERE id = $1`
 	return r.getOne(ctx, q, id)
 }
@@ -214,7 +214,7 @@ func (r *Repository) getOne(ctx context.Context, query string, arg any) (*User, 
 	var email *string          // email is nullable (phone-only accounts)
 	var lastActiveRole *string // NULL until the first token is issued
 	err := r.db.QueryRow(ctx, query, arg).Scan(
-		&u.ID, &phone, &email, &u.PasswordHash, &u.DisplayName, &u.Status, &lastActiveRole, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &phone, &email, &u.PasswordHash, &u.DisplayName, &u.AvatarURL, &u.Status, &lastActiveRole, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
