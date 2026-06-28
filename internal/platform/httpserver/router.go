@@ -95,7 +95,8 @@ func NewRouter(deps Deps) *gin.Engine {
 		public.POST("/login/code", deps.UserHandler.LoginCode) // identifier + code
 		public.POST("/refresh", deps.UserHandler.Refresh)      // rotate refresh → new access
 		public.POST("/logout", deps.UserHandler.Logout)        // revoke a refresh token
-		// Forgot-password: send an SMS reset code to a phone, then reset with it.
+		// Forgot-password: send a reset code to the identifier (SMS for a phone,
+		// email for an email), then reset with it.
 		public.POST("/password/forgot", deps.UserHandler.ForgotPassword)
 		public.POST("/password/reset", deps.UserHandler.ResetPassword)
 

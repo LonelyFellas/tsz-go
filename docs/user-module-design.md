@@ -347,3 +347,13 @@ async function bootstrapAdmin() {
 
 ### 12.3 测试补强
 - [x] **handler 层 409/404 映射断言**:已补 `internal/admin/handler_test.go`(`TestHandler_SetAdminStatus`,表驱动覆盖 200/404/409/400)。`SetAdminStatus` 的 `ErrLastSuperAdmin→409`、`ErrNotFound→404`、非法 id/status→400 均有断言。
+
+### 12.4 头像存储 / 上传（OSS） —— 上线后功能,非阻断
+- [ ] **头像上传 + OSS 落地** —— 状态:**字段已就位,上传未做**。`users.avatar_url` 列与 `User.AvatarURL` 已随 PR #28 合入,当前恒为空、无写入路径;前端拿到空串即用本地默认头像兜底。
+  - **触发条件**:产品需要用户自定义头像、且对象存储(OSS)已开通时再做。在那之前空串即可,无需任何改动。
+  - **设计(已与评审确定,落地时照此做)**:
+    - DB 列存**不透明引用**,现阶段**有意不固定格式**(存储 key 还是绝对 URL);因上线前无任何写入,落地时再定格式**零数据迁移**。
+    - 推荐存**相对 key**(如 `avatars/<id>.webp`),序列化时由一个可配置的 `AVATAR_BASE_URL`/CDN 域名拼成绝对地址 —— 以后换桶/换 CDN 只改一个配置,DB 不动。
+    - 上传走**预签名直传**(`POST /me/avatar` 返回 OSS presigned PUT URL,前端直传,回调写 key),后端不碰文件字节。
+    - 默认头像/identicon 若要做,放在这一阶段的 resolver 里(key 为空时返回 OSS 上的默认图),前端无感;**不要**在后端硬编码默认 URL。
+  - **配套测试(落地时补)**:写入 + 非空往返 + 上传流程的集成/e2e。当前因字段恒空,有意未加 avatar 专项测试。
