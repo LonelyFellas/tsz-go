@@ -14,8 +14,12 @@ import (
 )
 
 var (
-	ErrInvalidCredentials      = errors.New("invalid credentials")
-	ErrInvalidRole             = errors.New("invalid role")
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrInvalidRole        = errors.New("invalid role")
+	// ErrMissingIdentifier is returned by Register when neither a phone nor an
+	// email is supplied. An account must be reachable by at least one identifier
+	// (the database enforces the same via the users_phone_or_email_present CHECK).
+	ErrMissingIdentifier       = errors.New("phone or email is required")
 	ErrRoleNotOwned            = errors.New("user does not have this role")
 	ErrInvalidLearningSettings = errors.New("invalid learning settings")
 	// ErrAccountDisabled is returned when a disabled account tries to log in or
@@ -112,12 +116,17 @@ func NewService(repo Store, token *auth.TokenManager, codes Codes, sessions Sess
 	return &Service{repo: repo, token: token, codes: codes, sessions: sessions}
 }
 
-// Register creates an account. Phone is the required identifier; email is
-// optional. The initial identity is role, and the returned tokens are already
-// scoped to that role as the active one.
+// Register creates an account identified by a phone, an email, or both — at
+// least one is required. The initial identity is role, and the returned tokens
+// are already scoped to that role as the active one.
 func (s *Service) Register(ctx context.Context, phone, email, password, displayName string, role Role) (*User, string, string, error) {
 	if !role.Valid() {
 		return nil, "", "", ErrInvalidRole
+	}
+
+	phone, email = normalizePhone(phone), normalizeEmail(email)
+	if phone == "" && email == "" {
+		return nil, "", "", ErrMissingIdentifier
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -127,8 +136,8 @@ func (s *Service) Register(ctx context.Context, phone, email, password, displayN
 
 	u := &User{
 		ID:           uuid.New(),
-		Phone:        normalizePhone(phone),
-		Email:        normalizeEmail(email),
+		Phone:        phone,
+		Email:        email,
 		PasswordHash: string(hash),
 		DisplayName:  strings.TrimSpace(displayName),
 	}
@@ -194,29 +203,30 @@ func (s *Service) LoginCode(ctx context.Context, identifier, code string) (*User
 	return s.issue(ctx, u)
 }
 
-// RequestPasswordReset sends a one-time reset code over SMS to the given phone.
-// Like RequestLoginCode it does not check whether the phone is registered, so it
-// cannot be used to probe which accounts exist; an unregistered phone simply
-// receives a code that will never resolve to an account at ResetPassword time.
-func (s *Service) RequestPasswordReset(ctx context.Context, phone string) error {
-	return s.codes.RequestCode(ctx, normalizePhone(phone), codePurposePasswordReset)
+// RequestPasswordReset sends a one-time reset code to the identifier (phone →
+// SMS, email → email). Like RequestLoginCode it does not check whether the
+// identifier is registered, so it cannot be used to probe which accounts exist;
+// an unregistered identifier simply receives a code that will never resolve to an
+// account at ResetPassword time.
+func (s *Service) RequestPasswordReset(ctx context.Context, identifier string) error {
+	return s.codes.RequestCode(ctx, normalizeIdentifier(identifier), codePurposePasswordReset)
 }
 
 // ResetPassword completes the forgot-password flow: it verifies the reset code
-// previously sent to the phone, then sets a new password and revokes every
+// previously sent to the identifier, then sets a new password and revokes every
 // existing session so any attacker holding old tokens is locked out. A wrong/
-// expired code OR an unregistered phone both surface as ErrInvalidResetCode, so
-// the flow never reveals which numbers are registered. A disabled account is
-// rejected after the code check (mirroring code login) and cannot reset its way
-// back in.
-func (s *Service) ResetPassword(ctx context.Context, phone, code, newPassword string) error {
-	target := normalizePhone(phone)
+// expired code OR an unregistered identifier both surface as ErrInvalidResetCode,
+// so the flow never reveals which identifiers are registered. A disabled account
+// is rejected after the code check (mirroring code login) and cannot reset its
+// way back in.
+func (s *Service) ResetPassword(ctx context.Context, identifier, code, newPassword string) error {
+	target := normalizeIdentifier(identifier)
 
 	if err := s.codes.Verify(ctx, target, codePurposePasswordReset, code); err != nil {
 		return ErrInvalidResetCode
 	}
 
-	u, err := s.repo.GetByPhone(ctx, target)
+	u, err := s.lookupByIdentifier(ctx, identifier)
 	if errors.Is(err, ErrNotFound) {
 		// Valid code but no account: the code was just consumed, so this can't be
 		// replayed. Stay generic so existence isn't leaked.
@@ -293,11 +303,16 @@ func (s *Service) DeleteAccount(ctx context.Context, userID uuid.UUID, channel, 
 }
 
 // deletionTarget resolves the contact a deletion code is sent to / verified
-// against for the chosen channel. Email is optional on an account, so the email
-// channel is unavailable until one is on file.
+// against for the chosen channel. An account may now have only one of phone/
+// email, so either channel can be unavailable: asking to verify over a channel
+// the account has no contact for returns ErrChannelUnavailable (the frontend
+// should not offer that tab).
 func deletionTarget(u *User, channel string) (string, error) {
 	switch channel {
 	case DeletionChannelPhone:
+		if u.Phone == "" {
+			return "", ErrChannelUnavailable
+		}
 		return u.Phone, nil
 	case DeletionChannelEmail:
 		if u.Email == "" {
