@@ -1,0 +1,33 @@
+# Production compose for a SPLIT topology: this host runs only the Go app +
+# the one-shot migration step. The database is external (e.g. Aliyun RDS), so
+# there is no local `db` service — contrast docker-compose.yml, which bundles
+# Postgres for local dev.
+#
+# Secrets are NOT baked in here. Create a sibling `.env` (git-ignored) with:
+#   DATABASE_URL=postgres://USER:PASS@<rds-intranet-host>:5432/tsz?sslmode=disable
+#   JWT_SECRET=<openssl rand -hex 32>
+#   ADMIN_JWT_SECRET=<a DIFFERENT openssl rand -hex 32>
+# compose auto-loads `.env` and substitutes the ${...} references below.
+services:
+  migrate:
+    build: .
+    entrypoint: ["/bin/migrate"]
+    environment:
+      DATABASE_URL: "${DATABASE_URL}"
+
+  app:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8080"
+      DATABASE_URL: "${DATABASE_URL}"
+      JWT_SECRET: "${JWT_SECRET}"
+      ADMIN_JWT_SECRET: "${ADMIN_JWT_SECRET}"
+      JWT_TTL: "24h"
+      ADMIN_JWT_TTL: "24h"
+      APP_ENV: "production"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
