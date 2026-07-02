@@ -2,6 +2,7 @@ package user
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -742,7 +743,7 @@ func TestHandler_Me(t *testing.T) {
 
 	// seed a user directly in the store
 	id := uuid.New()
-	_ = store.Create(nil, &User{ID: id, Phone: "13800138000", Email: "me@b.com", PasswordHash: "x", DisplayName: "Me"}, RoleStudent)
+	_ = store.Create(context.Background(), &User{ID: id, Phone: "13800138000", Email: "me@b.com", PasswordHash: "x", DisplayName: "Me"}, RoleStudent)
 
 	t.Run("found", func(t *testing.T) {
 		w := httptest.NewRecorder()
