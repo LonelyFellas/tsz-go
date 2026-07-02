@@ -343,14 +343,20 @@ async function bootstrapAdmin() {
 - [ ] **替换生产密钥** —— 状态:**未做,留待上线**。将 `JWT_SECRET` 与 `ADMIN_JWT_SECRET` 从 `docker-compose.yml` 里的 `change-me-…` 占位值换成**真随机长串**;两者**必须不同**,否则服务拒绝启动(`internal/config`)。
   - **触发条件**:**部署到真实服务器前必做**(本地/测试环境用占位值无妨)。这是上线检查清单的硬性一项,漏了等于把后台签名密钥公开。
 
-### 12.2 健壮性硬化（可选,非阻断 —— 评估后暂不做）
-> 决策:当前为**单运营者后台**,以下均为理论风险,概率极低;为避免引入复杂度(尤其是内存 fake 需镜像 DB 原子语义)**暂不实现**,仅记录。下列触发条件出现时再做。
-- [ ] **最后超管守卫的 TOCTOU 竞态** —— 状态:**暂不做**。`Service.SetStatus` / `isLastActiveSuperAdmin`(`internal/admin/service.go`)是「先读后写」两步、无事务/锁;两个并发禁用请求理论上可同时通过检查 → 最终 0 个活跃超管。
-  - **触发条件**:当后台出现**多个超管并发操作**(多运营团队),或上线后对账号管理的并发正确性有硬性要求时再做。
-  - **做法**:DB 层带条件的原子 `UPDATE … WHERE NOT(是最后一个活跃超管)`;`RowsAffected=0` 时再查一次区分 404(不存在)/409(守卫拦下);`fakeStore` 同步镜像该原子语义 + 补并发测试。约 +40~50 行。
-- [ ] **`Limit: 1000` 魔法上限** —— 状态:**暂不做（基本不会触发）**。`isLastActiveSuperAdmin` 用翻页数超管,超过 1000 个会截断。
-  - **触发条件**:超管数量级有可能逼近 1000 时(现实几乎不可能)。
-  - **做法**:改为专用 `CountActiveSuperAdmins(ctx)` 计数查询,更准更省。可与上一条一并做。
+### 12.2 健壮性硬化（已做 2026-07-02）
+- [x] **最后超管守卫的 TOCTOU 竞态** —— 状态:**已修**。守卫从 service 下沉到 store 层
+  (`Repository.SetStatus`,`internal/admin/repository.go`):禁用路径走事务 +
+  `pg_advisory_xact_lock` 串行化,锁内一条 SQL 判「是否最后活跃超管」再 UPDATE。
+  没按原方案用条件 UPDATE:READ COMMITTED 下两个并发请求分别禁用仅剩的两个超管时,
+  各自快照都看到对方活跃,双双通过 → 仍会归零;advisory lock 无此问题且不会死锁。
+  `fakeStore.SetStatus` 在互斥锁内镜像同一原子语义;并发测试
+  `TestService_SetStatus_ConcurrentDisable`(-race)断言禁用竞赛后恰剩 1 个活跃超管。
+  守卫的放行路径(尚有其他活跃超管)进了 Store 契约测试;**拒绝路径(409)不可契约化**——
+  「最后一个」是全表条件,共享测试库有历史残留超管,永远无法确定性触发,同 List 的排除
+  理由,由 fake 侧 service 测试覆盖。
+- [x] **`Limit: 1000` 魔法上限** —— 状态:**已消除**。`isLastActiveSuperAdmin` 连同翻页
+  计数一起删除,超管计数改为守卫 SQL 里的 `NOT EXISTS` 子查询,无上限截断问题,也不再
+  需要专用 `CountActiveSuperAdmins`。
 
 ### 12.3 测试补强
 - [x] **handler 层 409/404 映射断言**:已补 `internal/admin/handler_test.go`(`TestHandler_SetAdminStatus`,表驱动覆盖 200/404/409/400)。`SetAdminStatus` 的 `ErrLastSuperAdmin→409`、`ErrNotFound→404`、非法 id/status→400 均有断言。
