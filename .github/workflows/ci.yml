@@ -69,6 +69,24 @@ jobs:
       - name: Test (unit + integration)
         run: go test -race -tags=integration -cover ./...
 
+  # golangci-lint (errcheck/staticcheck/unused …) — same config as local
+  # `make lint` (.golangci.yml). Parallel to the test job so it adds no wall
+  # time; the action pins the linter version so CI and local can't drift far.
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+
   # Lint the OpenAPI spec so a malformed or non-conformant spec (which still
   # compiles via go:embed) is caught here rather than white-screening Swagger UI
   # at runtime. Rule tuning lives in redocly.yaml; the lint fails the build on
@@ -91,7 +109,7 @@ jobs:
   # both `latest` and the commit SHA. Actual rollout is a later, separate step.
   docker:
     name: Build & push image
-    needs: [test, openapi-lint]
+    needs: [test, lint, openapi-lint]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

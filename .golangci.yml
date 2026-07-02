@@ -1,0 +1,21 @@
+# golangci-lint v2。默认 standard 集：errcheck / govet / ineffassign / staticcheck / unused。
+# 本地跑 `make lint`，CI 里是独立 job，两边共用这份配置。
+version: "2"
+
+run:
+  # 让 //go:build integration 的测试文件也进 lint 范围（CI 测试也是带该 tag 跑的）。
+  build-tags:
+    - integration
+
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        # 惯用法 `defer tx.Rollback(ctx)`：commit 成功后 rollback 是 no-op，返回值无意义。
+        - (github.com/jackc/pgx/v5.Tx).Rollback
+  exclusions:
+    presets:
+      # 官方维护的已知误报清单（如 staticcheck 对生成代码的抱怨）。
+      - common-false-positives
+      # 标准库错误处理的惯用豁免（如 defer f.Close()、(*bytes.Buffer).Write）。
+      - std-error-handling
