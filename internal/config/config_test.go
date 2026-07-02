@@ -122,6 +122,48 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 }
 
+// CookieSecure defaults track the env (dev serves plain http, everything else
+// assumes HTTPS), and COOKIE_SECURE=false must win over that default so a
+// plain-HTTP test host can keep its refresh cookies.
+func TestLoad_CookieSecure(t *testing.T) {
+	t.Run("defaults to false in development", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("APP_ENV", "development")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.CookieSecure {
+			t.Error("CookieSecure = true in development, want false")
+		}
+	})
+
+	t.Run("defaults to true outside development", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("APP_ENV", "production")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.CookieSecure {
+			t.Error("CookieSecure = false in production, want true")
+		}
+	})
+
+	t.Run("explicit false overrides the production default", func(t *testing.T) {
+		setRequired(t)
+		t.Setenv("APP_ENV", "production")
+		t.Setenv("COOKIE_SECURE", "false")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.CookieSecure {
+			t.Error("CookieSecure = true with COOKIE_SECURE=false, want false")
+		}
+	})
+}
+
 func TestLoad_InvalidDurationFallsBack(t *testing.T) {
 	setRequired(t)
 	t.Setenv("JWT_TTL", "not-a-duration")
