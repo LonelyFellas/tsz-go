@@ -9,7 +9,7 @@ DEV_JWT_TTL      ?= 24h
 
 AIR ?= $(shell go env GOPATH)/bin/air
 
-.PHONY: dev run build test tidy fmt vet up down logs migrate migrate-create seed
+.PHONY: dev run build test tidy fmt vet lint up down logs migrate migrate-create seed
 
 dev: ## Dev loop: Postgres in Docker + air live-reload (rebuilds on save, no Ctrl+C)
 	-docker compose stop app 2>/dev/null
@@ -50,6 +50,9 @@ fmt: ## Format all code
 
 vet: ## Static checks
 	$(GO) vet ./...
+
+lint: ## golangci-lint (errcheck/staticcheck etc., config in .golangci.yml)
+	golangci-lint run
 
 up: ## Build & start app + postgres via docker compose
 	docker compose up -d --build
