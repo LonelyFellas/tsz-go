@@ -48,6 +48,13 @@ func TestOpenAPISpecEmbedded(t *testing.T) {
 		"/api/v1/auth/logout-all",
 		"/api/v1/auth/switch-role",
 		"/api/v1/auth/roles",
+		"/api/v1/admin/words",
+		"/api/v1/admin/words/stats",
+		"/api/v1/admin/words/batch-delete",
+		"/api/v1/admin/words/related-search",
+		"/api/v1/admin/words/{wordId}",
+		"/api/v1/admin/words/{wordId}/content",
+		"/api/v1/admin/words/{wordId}/publish",
 	} {
 		if _, ok := doc.Paths[path]; !ok {
 			t.Errorf("spec missing path %q", path)

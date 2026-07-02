@@ -10,6 +10,7 @@ import (
 	"github.com/darwish/tsz-go/internal/admin"
 	"github.com/darwish/tsz-go/internal/auth"
 	"github.com/darwish/tsz-go/internal/user"
+	"github.com/darwish/tsz-go/internal/word"
 )
 
 const metricsPath = "/metrics"
@@ -23,6 +24,8 @@ type Deps struct {
 	// TokenManager); AdminHandler serves the back-office identity endpoints.
 	AdminTokenManager *auth.TokenManager
 	AdminHandler      *admin.Handler
+	// WordHandler serves the smart-wordlist authoring endpoints (admin realm).
+	WordHandler *word.Handler
 	// OpenAPISpec is the raw OpenAPI document served at /docs/openapi.yaml and
 	// rendered by the Swagger UI at /docs. Docs are mounted only when EnableDocs
 	// is true and the spec is non-empty.
@@ -154,6 +157,21 @@ func NewRouter(deps Deps) *gin.Engine {
 					admins.POST("", deps.AdminHandler.CreateAdmin)
 					admins.GET("", deps.AdminHandler.ListAdmins)
 					admins.PATCH("/:adminId/status", deps.AdminHandler.SetAdminStatus)
+				}
+
+				// Smart wordlist authoring (any admin, D13). Shell → full-tree
+				// save → publish; see docs/wordlist-module-design.md §6.
+				words := authed.Group("/words")
+				{
+					words.POST("", deps.WordHandler.Create)
+					words.GET("", deps.WordHandler.List)
+					words.GET("/stats", deps.WordHandler.Stats)
+					words.POST("/batch-delete", deps.WordHandler.BatchDelete)
+					words.GET("/related-search", deps.WordHandler.RelatedSearch)
+					words.GET("/:wordId", deps.WordHandler.Get)
+					words.PUT("/:wordId/content", deps.WordHandler.SaveContent)
+					words.POST("/:wordId/publish", deps.WordHandler.Publish)
+					words.DELETE("/:wordId", deps.WordHandler.Delete)
 				}
 			}
 		}
