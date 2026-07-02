@@ -3,8 +3,11 @@ package admin
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/darwish/tsz-go/internal/auth"
 	"github.com/darwish/tsz-go/internal/session"
@@ -228,5 +231,43 @@ func TestService_SetStatus_LastSuperAdminProtected(t *testing.T) {
 	// Now super2 is the last active one again — protected.
 	if err := svc.SetStatus(ctx, super2.ID, StatusDisabled); !errors.Is(err, ErrLastSuperAdmin) {
 		t.Fatalf("err = %v, want ErrLastSuperAdmin", err)
+	}
+}
+
+// TestService_SetStatus_ConcurrentDisable exercises the TOCTOU window the
+// store-level guard closes: with exactly two active super_admins, goroutines
+// race to disable both. A check-then-write guard lets one request per target
+// slip through and end at zero; the atomic guard must keep exactly one active.
+func TestService_SetStatus_ConcurrentDisable(t *testing.T) {
+	svc, store, _, _ := newTestService()
+	ctx := context.Background()
+	super1 := seedActive(t, svc, "13800138000", "password123", LevelSuperAdmin)
+	super2 := seedActive(t, svc, "13800138001", "password123", LevelSuperAdmin)
+
+	var wg sync.WaitGroup
+	for range 10 {
+		for _, id := range []uuid.UUID{super1.ID, super2.ID} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// Both outcomes are legal per call; only the aggregate matters.
+				_ = svc.SetStatus(ctx, id, StatusDisabled)
+			}()
+		}
+	}
+	wg.Wait()
+
+	supers, _, err := store.List(ctx, ListFilter{Level: LevelSuperAdmin, Limit: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	active := 0
+	for _, a := range supers {
+		if a.Status == StatusActive {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("active super_admins after concurrent disables = %d, want exactly 1", active)
 	}
 }

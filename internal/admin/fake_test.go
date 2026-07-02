@@ -111,6 +111,20 @@ func (f *fakeStore) SetStatus(_ context.Context, id uuid.UUID, s Status) error {
 	if !ok {
 		return ErrNotFound
 	}
+	// Mirror the repository's atomic last-super-admin guard: under the mutex,
+	// check-and-set is one step, just like the DB transaction + advisory lock.
+	if s == StatusDisabled && a.Level == LevelSuperAdmin && a.Status == StatusActive {
+		otherActive := false
+		for _, o := range f.byID {
+			if o.ID != id && o.Level == LevelSuperAdmin && o.Status == StatusActive {
+				otherActive = true
+				break
+			}
+		}
+		if !otherActive {
+			return ErrLastSuperAdmin
+		}
+	}
 	a.Status = s
 	return nil
 }

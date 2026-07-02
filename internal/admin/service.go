@@ -19,6 +19,7 @@ var (
 	ErrInvalidStatus      = errors.New("invalid status")
 	// ErrLastSuperAdmin guards against disabling the only active super_admin,
 	// which would leave the back office with no one able to manage accounts.
+	// Returned by Store.SetStatus, where the check is atomic with the update.
 	ErrLastSuperAdmin = errors.New("cannot disable the last active super admin")
 	// ErrAccountDisabled is returned when a disabled admin tries to log in. Kept
 	// distinct from ErrInvalidCredentials so the handler can surface a 403.
@@ -154,42 +155,15 @@ func (s *Service) List(ctx context.Context, f ListFilter) ([]Admin, int64, error
 }
 
 // SetStatus enables or disables an admin. Disabling takes effect within one
-// access-token TTL (login and refresh both reject a disabled account).
+// access-token TTL (login and refresh both reject a disabled account). The
+// store refuses to disable the last active super_admin (ErrLastSuperAdmin);
+// that guard is enforced atomically there so concurrent disables can't race
+// past a check-then-write window.
 func (s *Service) SetStatus(ctx context.Context, id uuid.UUID, status Status) error {
 	if status != StatusActive && status != StatusDisabled {
 		return ErrInvalidStatus
 	}
-	// Refuse to disable the last active super_admin — that would lock the back
-	// office out of all account management (self-disable included).
-	if status == StatusDisabled {
-		target, err := s.repo.GetByID(ctx, id)
-		if err != nil {
-			return err // ErrNotFound surfaces as a 404 in the handler
-		}
-		if target.Level == LevelSuperAdmin && target.Status == StatusActive {
-			if last, err := s.isLastActiveSuperAdmin(ctx, id); err != nil {
-				return err
-			} else if last {
-				return ErrLastSuperAdmin
-			}
-		}
-	}
 	return s.repo.SetStatus(ctx, id, status)
-}
-
-// isLastActiveSuperAdmin reports whether id is the only active super_admin, i.e.
-// no other active super_admin remains.
-func (s *Service) isLastActiveSuperAdmin(ctx context.Context, id uuid.UUID) (bool, error) {
-	supers, _, err := s.repo.List(ctx, ListFilter{Level: LevelSuperAdmin, Limit: 1000})
-	if err != nil {
-		return false, err
-	}
-	for _, a := range supers {
-		if a.ID != id && a.Status == StatusActive {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 // SeedSuperAdmin ensures an active super_admin exists for the given phone,

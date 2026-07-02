@@ -132,17 +132,63 @@ func (r *Repository) List(ctx context.Context, f ListFilter) ([]Admin, int64, er
 }
 
 // SetStatus updates an admin's lifecycle state. Disabling locks the account out
-// at the next login or refresh. Returns ErrNotFound if no such admin exists.
+// at the next login or refresh. Returns ErrNotFound if no such admin exists and
+// ErrLastSuperAdmin when the update would disable the only active super_admin.
+//
+// The guard lives here, not in the service: check and update must be one atomic
+// step or two concurrent disables can each pass the check and leave the back
+// office with zero active super_admins.
 func (r *Repository) SetStatus(ctx context.Context, id uuid.UUID, s Status) error {
-	ct, err := r.db.Exec(ctx,
-		`UPDATE admins SET status = $2, updated_at = now() WHERE id = $1`, id, s)
-	if err != nil {
-		return fmt.Errorf("set admin status: %w", err)
+	if s != StatusDisabled {
+		// Enabling can never reduce the active super_admin count — no guard.
+		ct, err := r.db.Exec(ctx,
+			`UPDATE admins SET status = $2, updated_at = now() WHERE id = $1`, id, s)
+		if err != nil {
+			return fmt.Errorf("set admin status: %w", err)
+		}
+		if ct.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
 	}
-	if ct.RowsAffected() == 0 {
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin set status: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// A conditional UPDATE alone is not enough: under READ COMMITTED, two
+	// concurrent requests disabling the two remaining super_admins would each
+	// see the other still active in their own snapshot and both pass. One
+	// advisory lock (auto-released at commit/rollback) serializes disables —
+	// cheap at back-office traffic, and immune to lock-ordering deadlocks.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('admins:last_super_admin_guard'))`); err != nil {
+		return fmt.Errorf("acquire super admin guard lock: %w", err)
+	}
+
+	var lastActiveSuper bool
+	err = tx.QueryRow(ctx, `
+		SELECT level = 'super_admin' AND status = 'active' AND NOT EXISTS (
+			SELECT 1 FROM admins o
+			WHERE o.id <> admins.id AND o.level = 'super_admin' AND o.status = 'active')
+		FROM admins WHERE id = $1`, id).Scan(&lastActiveSuper)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
-	return nil
+	if err != nil {
+		return fmt.Errorf("check last super admin: %w", err)
+	}
+	if lastActiveSuper {
+		return ErrLastSuperAdmin
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE admins SET status = $2, updated_at = now() WHERE id = $1`, id, s); err != nil {
+		return fmt.Errorf("set admin status: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // SetLevel changes an admin's privilege tier. Used by the seed bootstrap to

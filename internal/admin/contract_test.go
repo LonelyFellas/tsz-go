@@ -21,6 +21,13 @@ import (
 // whole admins table, which the shared, never-truncated test DB pollutes across
 // tests and runs, so the result can't be asserted exactly against both the fake
 // and the real repo. List stays covered by the fake-backed service tests.
+//
+// The ErrLastSuperAdmin branch of SetStatus is excluded for the same reason:
+// "last active super_admin" is a whole-table condition, and the shared DB
+// retains active super_admins from earlier runs, so the guard can never be
+// made to fire there deterministically. The allowed path (another active
+// super_admin exists) is asserted below; the refusal path and its concurrency
+// guarantee stay covered by the fake-backed service tests.
 
 // randPhone / ctEmail mint identifiers unique across runs (the test DB is shared
 // and never truncated), the same way the user package does it.
@@ -155,6 +162,27 @@ func runStoreContract(t *testing.T, newStore func() Store) {
 		}
 		if err := st.SetStatus(ctx, uuid.New(), StatusDisabled); !errors.Is(err, ErrNotFound) {
 			t.Errorf("SetStatus unknown: err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("disabling a super_admin passes the guard when another active one exists", func(t *testing.T) {
+		st := newStore()
+		a, b := mk(), mk()
+		a.Level, b.Level = LevelSuperAdmin, LevelSuperAdmin
+		for _, s := range []*Admin{a, b} {
+			if err := st.Create(ctx, s); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+		}
+		if err := st.SetStatus(ctx, a.ID, StatusDisabled); err != nil {
+			t.Fatalf("SetStatus(disable with backup super): %v", err)
+		}
+		got, err := st.GetByID(ctx, a.ID)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		if got.Status != StatusDisabled {
+			t.Errorf("status = %q, want %q", got.Status, StatusDisabled)
 		}
 	})
 
