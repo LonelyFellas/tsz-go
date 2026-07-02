@@ -340,8 +340,9 @@ async function bootstrapAdmin() {
 > 每条都标了**状态**与**触发条件（何时再做）**,避免遗忘。
 
 ### 12.1 部署前必做（生产阻断项）
-- [ ] **替换生产密钥** —— 状态:**未做,留待上线**。将 `JWT_SECRET` 与 `ADMIN_JWT_SECRET` 从 `docker-compose.yml` 里的 `change-me-…` 占位值换成**真随机长串**;两者**必须不同**,否则服务拒绝启动(`internal/config`)。
-  - **触发条件**:**部署到真实服务器前必做**(本地/测试环境用占位值无妨)。这是上线检查清单的硬性一项,漏了等于把后台签名密钥公开。
+- [x] **替换生产密钥** —— 状态:**已完成（2026-07-02 核实）**。生产 secrets 在 app 主机
+  `/opt/tshb-go/.env`（git-ignored,非 compose 文件）,`JWT_SECRET` 与 `ADMIN_JWT_SECRET`
+  均为 64 位随机值且互不相同。本地/测试环境继续用 `change-me-…` 占位值,无妨。
 
 ### 12.2 健壮性硬化（已做 2026-07-02）
 - [x] **最后超管守卫的 TOCTOU 竞态** —— 状态:**已修**。守卫从 service 下沉到 store 层
