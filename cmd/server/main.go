@@ -84,10 +84,11 @@ func run() error {
 
 	userRepo := user.NewRepository(pool)
 	userService := user.NewService(userRepo, tokenManager, otpService, sessionService)
-	// Refresh tokens ride in an HttpOnly cookie. Secure is on outside dev so the
-	// cookie is HTTPS-only in production; MaxAge mirrors the refresh-token TTL.
+	// Refresh tokens ride in an HttpOnly cookie. CookieSecure defaults to true
+	// outside dev (HTTPS-only) but is overridable for plain-HTTP test hosts;
+	// MaxAge mirrors the refresh-token TTL.
 	userHandler := user.NewHandler(userService, user.CookieConfig{
-		Secure: cfg.Env != "development",
+		Secure: cfg.CookieSecure,
 		MaxAge: cfg.RefreshTokenTTL,
 	}, cfg.JWTTTL, cfg.RefreshTokenTTL)
 
@@ -99,7 +100,7 @@ func run() error {
 	adminSessionService := session.NewService(admin.NewSessionRepository(pool), cfg.AdminRefreshTokenTTL)
 	adminService := admin.NewService(admin.NewRepository(pool), adminTokenManager, adminSessionService)
 	adminHandler := admin.NewHandler(adminService, admin.CookieConfig{
-		Secure: cfg.Env != "development",
+		Secure: cfg.CookieSecure,
 		MaxAge: cfg.AdminRefreshTokenTTL,
 	}, cfg.AdminJWTTTL, cfg.AdminRefreshTokenTTL)
 

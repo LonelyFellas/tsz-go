@@ -28,6 +28,9 @@ services:
       JWT_TTL: "24h"
       ADMIN_JWT_TTL: "24h"
       APP_ENV: "production"
+      # Unset by default -> Secure stays on (HTTPS-only cookies). A plain-HTTP
+      # test host puts COOKIE_SECURE=false in its .env; production must not.
+      COOKIE_SECURE: "${COOKIE_SECURE:-}"
     ports:
       - "8080:8080"
     restart: unless-stopped

@@ -66,6 +66,12 @@ type Config struct {
 	TracingInsecure bool
 	// ServiceName labels metrics and traces (default "tsz-go").
 	ServiceName string
+	// CookieSecure marks the refresh-token cookies Secure (HTTPS-only). Defaults
+	// to true outside development. Set COOKIE_SECURE=false ONLY on a plain-HTTP
+	// test host (bare-IP access before TLS): browsers silently drop Secure
+	// cookies on http origins, so the refresh cookie never lands and session
+	// restore 401s on every page reload. Never set false in production.
+	CookieSecure bool
 	// TrustedProxies lists the proxy CIDRs/IPs whose X-Forwarded-For header is
 	// honored when resolving the client IP. Empty (the default) trusts none, so
 	// ClientIP() falls back to the direct peer address and a client cannot spoof
@@ -99,6 +105,8 @@ func Load() (Config, error) {
 		ServiceName:          getenv("SERVICE_NAME", "tsz-go"),
 		TrustedProxies:       getcsv("TRUSTED_PROXIES"),
 	}
+	// Depends on cfg.Env, so it can't sit inside the literal above.
+	cfg.CookieSecure = getbool("COOKIE_SECURE", cfg.Env != "development")
 
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("config: DATABASE_URL is required")
