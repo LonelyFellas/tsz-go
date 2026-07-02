@@ -642,6 +642,24 @@ The full endpoint list, request/response schemas, and error cases live in the
 OpenAPI spec ([openapi.yaml](openapi.yaml), tags `Admin (…)`) and the design
 rationale in [architecture.md](architecture.md) §9.
 
+#### Smart wordlist authoring (`/api/v1/admin/words`) — implemented
+
+The 智能词库 content hub. Data model, decisions (D1–D17) and validation rules:
+[wordlist-module-design.md](wordlist-module-design.md); full schemas: OpenAPI
+tag `Admin (words)`. Any admin may author (no super_admin gate).
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/admin/words` | Create a shell (`{headword, kind}`, kind `word`/`phrase`) → **201** draft. **409** duplicate headword+kind. |
+| `GET` | `/admin/words/{id}` | Whole entry tree; `updated_at` is the optimistic-lock token. |
+| `PUT` | `/admin/words/{id}/content` | **保存** — full-tree replace. Body carries `base_updated_at` (mismatch → **409**) and the tree; node ids are **client-generated UUIDs, stable across saves**. Drafts validate structurally only; published entries must stay complete (**422** otherwise). Audio fields & relation snapshots are server-owned, ignored on input. |
+| `POST` | `/admin/words/{id}/publish` | **提交** — completeness check (design §7) then `draft → published`; failure → **422** `{error, details[]}`. Republish is idempotent and re-triggers question generation. |
+| `GET` | `/admin/words` | List page: `q` (词汇/创建人), `gloss`, `kind`, `pos`, `level`, `status`, `created_from/to` (RFC3339) + pagination; rows carry derived `gloss` / `pos_list` / `levels`. |
+| `GET` | `/admin/words/stats` | `{total, today, month}` creation counters (Asia/Shanghai). |
+| `DELETE` | `/admin/words/{id}` | Delete the tree; inbound related-word links keep snapshots, lose FKs. |
+| `POST` | `/admin/words/batch-delete` | `{ids[]}` (≤100) → `{deleted}`; unknown ids skipped. |
+| `GET` | `/admin/words/related-search` | 添加关联词 dialog: `q`, optional `kind`, `limit` → entries with their senses (gloss = first zh definition). |
+
 ---
 
 ## Typical flows

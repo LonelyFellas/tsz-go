@@ -23,6 +23,7 @@ import (
 	"github.com/darwish/tsz-go/internal/platform/observability"
 	"github.com/darwish/tsz-go/internal/session"
 	"github.com/darwish/tsz-go/internal/user"
+	"github.com/darwish/tsz-go/internal/word"
 )
 
 func main() {
@@ -102,6 +103,12 @@ func run() error {
 		MaxAge: cfg.AdminRefreshTokenTTL,
 	}, cfg.AdminJWTTTL, cfg.AdminRefreshTokenTTL)
 
+	// Smart wordlist authoring (admin realm). The nil hook is the question-
+	// generation trigger slot — the learning system's generator plugs in here
+	// once it exists (design D11).
+	wordService := word.NewService(word.NewRepository(pool), nil)
+	wordHandler := word.NewHandler(wordService)
+
 	// Per-IP throttle on the public auth endpoints; disabled when configured
 	// to 0. Idle buckets are evicted after a fixed window so memory is bounded.
 	var authRateLimiter *httpserver.IPRateLimiter
@@ -140,6 +147,7 @@ func run() error {
 		UserHandler:       userHandler,
 		AdminTokenManager: adminTokenManager,
 		AdminHandler:      adminHandler,
+		WordHandler:       wordHandler,
 		OpenAPISpec:       docs.OpenAPISpec,
 		EnableDocs:        cfg.DocsEnabled,
 		AuthRateLimiter:   authRateLimiter,

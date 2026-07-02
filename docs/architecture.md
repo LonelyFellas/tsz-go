@@ -178,6 +178,11 @@ Scheduler：
 词项 → 词典 API → 科大讯飞 TTS → OSS → 记录 audio_url → 后台可校正
 ```
 
+**智能词库创编（后端已实现）：** admin 侧词条创作（方言/词形/发音/语法结构/多维
+词义/关联词，草稿→发布）已落地——数据模型与接口契约见
+[wordlist-module-design.md](wordlist-module-design.md)，代码 `internal/word/`，
+路由 `/api/v1/admin/words`；TTS/OSS 音频只留字段，接入时走上面的流水线。
+
 ---
 
 ## 7. 权限模型

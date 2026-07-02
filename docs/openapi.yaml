@@ -71,6 +71,15 @@ tags:
     description: |
       Tiansheng-coin administration — grant, deduct, leaderboard, per-account
       ledger. Backed by an append-only ledger (see §9.3). Requires an admin-realm token.
+  - name: Admin (words)
+    description: |
+      Smart-wordlist authoring (智能词库) — the back-office content hub. Flow:
+      create a shell (headword) → full-tree save (the 保存 button, optimistic
+      lock via base_updated_at) → publish (the 提交 button, completeness check
+      V1–V10). All tree node ids are client-generated UUIDs and stable across
+      saves; audio fields are read-only here (the future TTS/upload endpoints
+      own them). Contract and data model: docs/wordlist-module-design.md.
+      Requires an admin-realm token.
   - name: Admin (audit)
     description: Read-only audit trail of sensitive back-office actions (§9.4). Requires an admin-realm token.
 
@@ -1326,6 +1335,320 @@ paths:
         "403":
           $ref: "#/components/responses/ForbiddenError"
 
+  /api/v1/admin/words:
+    post:
+      tags: [Admin (words)]
+      summary: Create a word shell (step 1, 基本信息)
+      operationId: adminCreateWord
+      security:
+        - adminBearerAuth: []
+      description: |
+        Registers the headword and returns a draft entry with an empty tree.
+        Everything else is entered on step 2 and saved via PUT …/content.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WordCreateRequest"
+      responses:
+        "201":
+          description: Draft shell created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WordResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          description: An entry with this headword and kind already exists (case-insensitive).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "word already exists" }
+    get:
+      tags: [Admin (words)]
+      summary: List word entries (list page)
+      operationId: adminListWords
+      security:
+        - adminBearerAuth: []
+      description: |
+        Backs the 智能词库 list page. Derived columns: `gloss` is the first
+        definition of the first sense of the first pos; `levels` aggregates the
+        entry's sense levels (难度).
+      parameters:
+        - name: q
+          in: query
+          description: Substring match on headword or creator display name (关键字).
+          schema: { type: string }
+        - name: gloss
+          in: query
+          description: Substring match on any definition text (释义).
+          schema: { type: string }
+        - name: kind
+          in: query
+          schema: { $ref: "#/components/schemas/WordKind" }
+        - name: pos
+          in: query
+          description: Entries having this part of speech (基本词性).
+          schema: { type: string }
+        - name: level
+          in: query
+          description: Entries having a sense at this CEFR level (难度).
+          schema: { $ref: "#/components/schemas/CEFRLevel" }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/WordStatus" }
+        - name: created_from
+          in: query
+          description: Inclusive lower bound on created_at, RFC3339.
+          schema: { type: string, format: date-time }
+        - name: created_to
+          in: query
+          description: Exclusive upper bound on created_at, RFC3339.
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WordListResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+
+  /api/v1/admin/words/stats:
+    get:
+      tags: [Admin (words)]
+      summary: List-page counters (累计 / 今日 / 本月创编)
+      operationId: adminWordStats
+      security:
+        - adminBearerAuth: []
+      description: Day/month boundaries are computed in business time (Asia/Shanghai).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WordStats"
+        "401":
+          $ref: "#/components/responses/AuthError"
+
+  /api/v1/admin/words/batch-delete:
+    post:
+      tags: [Admin (words)]
+      summary: Delete selected entries (list-page checkboxes)
+      operationId: adminBatchDeleteWords
+      security:
+        - adminBearerAuth: []
+      description: |
+        Unknown ids are skipped rather than failing the batch (the list may race
+        another editor's delete); the response reports how many entries existed.
+        Max 100 ids.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WordBatchDeleteRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WordBatchDeleteResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+
+  /api/v1/admin/words/related-search:
+    get:
+      tags: [Admin (words)]
+      summary: Search entries for the related-word dialog (添加关联词)
+      operationId: adminWordRelatedSearch
+      security:
+        - adminBearerAuth: []
+      description: |
+        Substring match on headword, prefix matches first. Each hit lists its
+        senses so the editor picks one (关联词必须选到词义); a sense is shown by
+        its first Chinese definition (first definition if none is Chinese). A
+        blank q returns an empty result.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: kind
+          in: query
+          description: Restrict to words or phrases (the dialog's 单词/短语 tabs).
+          schema: { $ref: "#/components/schemas/WordKind" }
+        - name: limit
+          in: query
+          description: Max hits, 1–50 (default 20).
+          schema: { type: integer, default: 20 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WordRelatedSearchResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+
+  /api/v1/admin/words/{wordId}:
+    get:
+      tags: [Admin (words)]
+      summary: Read the whole entry tree (edit page)
+      operationId: adminGetWord
+      security:
+        - adminBearerAuth: []
+      description: |
+        The edit page loads the full tree once; tab switches are local. The
+        returned `updated_at` is the optimistic-lock token to echo back as
+        `base_updated_at` on the next save.
+      parameters:
+        - $ref: "#/components/parameters/WordId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WordResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+    delete:
+      tags: [Admin (words)]
+      summary: Delete one entry
+      operationId: adminDeleteWord
+      security:
+        - adminBearerAuth: []
+      description: |
+        Removes the entry and its whole tree. Other entries' related-word rows
+        pointing at its senses keep their display snapshots but lose the link
+        (FKs go NULL).
+      parameters:
+        - $ref: "#/components/parameters/WordId"
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+  /api/v1/admin/words/{wordId}/content:
+    put:
+      tags: [Admin (words)]
+      summary: Save the full tree (the 保存 button)
+      operationId: adminSaveWordContent
+      security:
+        - adminBearerAuth: []
+      description: |
+        Full-tree replace, diffed by node id: known ids update, new ids insert,
+        absent ids delete. New nodes carry **client-generated UUIDs** — sense
+        ids must stay stable across saves because other entries' related words
+        point at them. Array order is display order. Audio fields and relation
+        snapshots in the body are ignored (server-owned). Drafts save with
+        structural validation only; a **published** entry must stay
+        publish-complete (422 otherwise) and a successful save re-triggers its
+        question update.
+      parameters:
+        - $ref: "#/components/parameters/WordId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WordSaveRequest"
+      responses:
+        "200":
+          description: Saved; returns the stored tree (same shape as GET).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WordResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "409":
+          description: Optimistic-lock miss — the entry changed since base_updated_at.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "word was modified by others" }
+        "422":
+          description: The entry is published and this save would leave it incomplete (D17).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WordIncompleteError"
+
+  /api/v1/admin/words/{wordId}/publish:
+    post:
+      tags: [Admin (words)]
+      summary: Publish (the 提交 button)
+      operationId: adminPublishWord
+      security:
+        - adminBearerAuth: []
+      description: |
+        Runs the completeness check (design §7, V1–V10) and flips the entry to
+        published, triggering question generation. Republishing an already
+        published entry is idempotent and re-triggers generation. A concurrent
+        content save landing between the check and the flip aborts the publish
+        with 409 — retry after reloading.
+      parameters:
+        - $ref: "#/components/parameters/WordId"
+      responses:
+        "200":
+          description: Published.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WordResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "409":
+          description: The entry changed while publishing (optimistic-lock miss).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: "word was modified by others" }
+        "422":
+          description: Completeness violations, one detail line per broken rule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WordIncompleteError"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1383,6 +1706,15 @@ components:
       in: path
       required: true
       description: Target user id.
+      schema:
+        type: string
+        format: uuid
+
+    WordId:
+      name: wordId
+      in: path
+      required: true
+      description: Target word entry id.
       schema:
         type: string
         format: uuid
@@ -2209,6 +2541,554 @@ components:
         page:
           $ref: "#/components/schemas/PageMeta"
       required: [items, page]
+
+    # --- Smart wordlist (智能词库) — docs/wordlist-module-design.md ---
+
+    WordKind:
+      type: string
+      enum: [word, phrase]
+      description: Single word or phrase (创建单词 / 创建短语). Same tree either way.
+
+    WordStatus:
+      type: string
+      enum: [draft, published]
+      description: Drafts save loosely; publishing runs the completeness check.
+
+    WordDialect:
+      type: string
+      enum: [uk, us, common]
+      description: |
+        Dialect tag on forms and grammar variants. `common` (通用) is the only
+        value on entries that don't distinguish dialects.
+
+    WordFrequency:
+      type: string
+      description: |
+        Percent value, canonicalized to exactly six decimals ("0.5" is stored
+        and returned as "0.500000"). Manually entered; empty/omitted while
+        unset (drafts only — publish requires it).
+      example: "0.023134"
+
+    RichTextSpan:
+      type: object
+      required: [start, end, type]
+      properties:
+        start:
+          type: integer
+          description: Inclusive start offset, in Unicode code points.
+        end:
+          type: integer
+          description: Exclusive end offset.
+        type:
+          type: string
+          enum: [bold, blue]
+
+    RichText:
+      type: object
+      description: |
+        Rich text v1 (design D7, §5). Positional marks instead of HTML so
+        speech synthesis and the training side can locate the bold/blue parts;
+        liaisons[i] marks a liaison symbol between code points i and i+1
+        (display only). All offsets count Unicode code points, NOT UTF-16
+        units — JavaScript clients must convert (e.g. [...str] or
+        Intl.Segmenter) or astral characters (emoji) shift every mark.
+        Omitted spans/liaisons are normalized to [] server-side. Limits: text
+        ≤ 5000 code points, ≤ 500 marks per array.
+      required: [version, text]
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        text:
+          type: string
+        spans:
+          type: array
+          items:
+            $ref: "#/components/schemas/RichTextSpan"
+        liaisons:
+          type: array
+          items:
+            type: integer
+
+    WordPronunciation:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Client-generated, stable across saves.
+        dict_phonetic:
+          type: string
+          description: 字典音标. Required at publish.
+        actual_pron:
+          type: string
+          description: 实际发音. Required at publish.
+        style:
+          type: string
+          enum: [normal, strong, weak]
+          default: normal
+          description: 发音方式 — 正常/强读/弱读.
+        audio_url:
+          type: string
+          readOnly: true
+          description: Written by the future TTS/upload endpoints; tree saves preserve it.
+        audio_source:
+          type: string
+          enum: [tts, upload]
+          readOnly: true
+
+    WordForm:
+      type: object
+      required: [id, dialect, form_type]
+      properties:
+        id:
+          type: string
+          format: uuid
+        dialect:
+          $ref: "#/components/schemas/WordDialect"
+        form_type:
+          type: string
+          description: |
+            词形类别 seed enum: base (原形, exactly one per selected dialect),
+            present_participle, past_tense, past_participle,
+            third_person_singular, plural, comparative, superlative. Non-base
+            types may repeat (two past tenses are legal).
+        spelling:
+          type: string
+          description: 单词拼写. Required at publish.
+        pronunciations:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordPronunciation"
+
+    WordGrammarVariant:
+      type: object
+      required: [id, dialect, content]
+      properties:
+        id:
+          type: string
+          format: uuid
+        dialect:
+          $ref: "#/components/schemas/WordDialect"
+        content:
+          $ref: "#/components/schemas/RichText"
+        audio_url:
+          type: string
+          readOnly: true
+        audio_source:
+          type: string
+          enum: [tts, upload]
+          readOnly: true
+
+    WordGrammarStructure:
+      type: object
+      description: |
+        One numbered 语法结构 group — the dialect-agnostic unit definitions
+        reference; each selected dialect gets one variant row (D4).
+      required: [id]
+      properties:
+        id:
+          type: string
+          format: uuid
+        variants:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordGrammarVariant"
+
+    WordDefinition:
+      type: object
+      required: [id, level, def_type, text]
+      properties:
+        id:
+          type: string
+          format: uuid
+        level:
+          $ref: "#/components/schemas/CEFRLevel"
+        def_type:
+          type: string
+          enum: [zh, en]
+          description: 中文释义 / 英语释义 (orthogonal to dialect).
+        text:
+          $ref: "#/components/schemas/RichText"
+        grammar_structure_id:
+          type: string
+          format: uuid
+          description: Optional binding to a grammar structure of the same pos.
+        audio_url:
+          type: string
+          readOnly: true
+        audio_source:
+          type: string
+          enum: [tts, upload]
+          readOnly: true
+
+    WordSentence:
+      type: object
+      description: |
+        多维例句 row — a weak reference into the future example-sentence module
+        plus a text snapshot (D5); either side may be present in drafts.
+      required: [id]
+      properties:
+        id:
+          type: string
+          format: uuid
+        source_example_id:
+          type: string
+          format: uuid
+        text:
+          $ref: "#/components/schemas/RichText"
+        audio_url:
+          type: string
+          readOnly: true
+        audio_source:
+          type: string
+          enum: [tts, upload]
+          readOnly: true
+
+    WordRelation:
+      type: object
+      description: |
+        关联词 row pointing at another entry's sense. target_word_id is always
+        required; target_sense_id may be absent in drafts (publish enforces it).
+        The headword/gloss snapshots are server-written (gloss = target sense's
+        first Chinese definition) and survive the target's deletion — the FK
+        fields go null then, the snapshots stay.
+      required: [id, relation, target_word_id]
+      properties:
+        id:
+          type: string
+          format: uuid
+        relation:
+          type: string
+          enum: [synonym, antonym, derivative]
+        target_word_id:
+          type: string
+          format: uuid
+        target_sense_id:
+          type: string
+          format: uuid
+        target_headword:
+          type: string
+          readOnly: true
+        target_gloss:
+          type: string
+          readOnly: true
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 0
+          description: 近似度/对立度/关联度, integer percent.
+
+    WordSense:
+      type: object
+      description: |
+        词义 — the unit the learning system gates on (level ≤ student CEFR) and
+        orders by (frequency). Its id is referenced by other entries' related
+        words, so it must stay stable across saves.
+      required: [id, level]
+      properties:
+        id:
+          type: string
+          format: uuid
+        sub_pos:
+          type: string
+          enum:
+            ["", V-T, V-I, V-LINK, AUX, MODAL, N-COUNT, N-UNCOUNT, N-PROPER,
+             N-PLURAL, N-SING, ADJ, ADV, PRON, PREP, CONJ, DET, ART, NUM, INT]
+          description: |
+            细分词性 code, one enum mapping shared between frontend and backend
+            (labels: V-T 及物动词, V-I 不及物动词, V-LINK 系动词, AUX 助动词,
+            MODAL 情态动词, N-COUNT 可数名词, N-UNCOUNT 不可数名词, N-PROPER
+            专有名词, N-PLURAL 复数名词, N-SING 单数名词, ADJ 形容词, ADV 副词,
+            PRON 代词, PREP 介词, CONJ 连词, DET 限定词, ART 冠词, NUM 数词,
+            INT 感叹词). Empty allowed in drafts; required at publish.
+        level:
+          $ref: "#/components/schemas/CEFRLevel"
+        sense_group_id:
+          type: string
+          format: uuid
+          description: Optional 语义区间 pick, one of this entry's sense_groups.
+        frequency:
+          $ref: "#/components/schemas/WordFrequency"
+        depends_on_context:
+          type: boolean
+          default: false
+          description: 是否依赖语境 — drives which question types may be generated (design §8).
+        definitions:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordDefinition"
+        sentences:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordSentence"
+        relations:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordRelation"
+
+    WordPOS:
+      type: object
+      description: One 基本词性 tab; forms, grammar structures and senses hang here.
+      required: [id, pos]
+      properties:
+        id:
+          type: string
+          format: uuid
+        pos:
+          type: string
+          description: |
+            Seed enum: noun, pronoun, verb, adjective, adverb, preposition,
+            article, determiner, conjunction, numeral, interjection. Unique
+            within one entry.
+        forms:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordForm"
+        grammar_structures:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordGrammarStructure"
+        senses:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordSense"
+
+    WordSenseGroup:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+
+    Word:
+      type: object
+      description: |
+        A full word entry (the tree the edit page loads once). Array order is
+        display order everywhere. `updated_at` doubles as the optimistic-lock
+        token: echo it back as `base_updated_at` when saving.
+      required:
+        [id, kind, headword, dialect_mode, dialects, status, created_by, created_at, updated_at, sense_groups, pos]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          $ref: "#/components/schemas/WordKind"
+        headword:
+          type: string
+        frequency:
+          $ref: "#/components/schemas/WordFrequency"
+        dialect_mode:
+          type: string
+          enum: [distinguish, unified]
+        dialects:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordDialect"
+          description: Non-empty subset of [uk, us] when distinguishing; empty when unified.
+        status:
+          $ref: "#/components/schemas/WordStatus"
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        sense_groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordSenseGroup"
+        pos:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordPOS"
+
+    WordCreateRequest:
+      type: object
+      required: [headword]
+      properties:
+        headword:
+          type: string
+          description: Trimmed; unique per kind, case-insensitive. Max 200 characters.
+        kind:
+          $ref: "#/components/schemas/WordKind"
+
+    WordSaveRequest:
+      type: object
+      description: |
+        The full editable tree. Server-owned fields (status, kind, headword,
+        audio, relation snapshots) are not part of this body — audio and
+        snapshots are ignored if sent.
+      required: [base_updated_at, dialect_mode, dialects, sense_groups, pos]
+      properties:
+        base_updated_at:
+          type: string
+          format: date-time
+          description: The updated_at last read; a mismatch is a 409 (concurrent edit).
+        frequency:
+          $ref: "#/components/schemas/WordFrequency"
+        dialect_mode:
+          type: string
+          enum: [distinguish, unified]
+        dialects:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordDialect"
+        sense_groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordSenseGroup"
+        pos:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordPOS"
+
+    WordResponse:
+      type: object
+      properties:
+        word:
+          $ref: "#/components/schemas/Word"
+      required: [word]
+
+    WordListItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        headword:
+          type: string
+        kind:
+          $ref: "#/components/schemas/WordKind"
+        gloss:
+          type: string
+          description: 释义 column — first definition of the first sense of the first pos.
+        pos_list:
+          type: array
+          items:
+            type: string
+        levels:
+          type: array
+          items:
+            $ref: "#/components/schemas/CEFRLevel"
+          description: 难度 column — distinct sense levels, ordered A1→C2.
+        status:
+          $ref: "#/components/schemas/WordStatus"
+        created_by_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [id, headword, kind, status, created_at, updated_at]
+
+    WordListResponse:
+      type: object
+      properties:
+        words:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordListItem"
+        page:
+          $ref: "#/components/schemas/PageMeta"
+      required: [words, page]
+
+    WordStats:
+      type: object
+      properties:
+        total:
+          type: integer
+          format: int64
+        today:
+          type: integer
+          format: int64
+        month:
+          type: integer
+          format: int64
+      required: [total, today, month]
+
+    WordBatchDeleteRequest:
+      type: object
+      required: [ids]
+      properties:
+        ids:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            format: uuid
+
+    WordBatchDeleteResponse:
+      type: object
+      properties:
+        deleted:
+          type: integer
+          format: int64
+          description: How many of the given entries actually existed.
+      required: [deleted]
+
+    WordRelatedSenseOption:
+      type: object
+      properties:
+        sense_id:
+          type: string
+          format: uuid
+        gloss:
+          type: string
+          description: First Chinese definition (first definition if none is Chinese).
+      required: [sense_id, gloss]
+
+    WordRelatedSearchResult:
+      type: object
+      properties:
+        word_id:
+          type: string
+          format: uuid
+        headword:
+          type: string
+        kind:
+          $ref: "#/components/schemas/WordKind"
+        senses:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordRelatedSenseOption"
+      required: [word_id, headword, kind, senses]
+
+    WordRelatedSearchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordRelatedSearchResult"
+      required: [results]
+
+    WordIncompleteError:
+      type: object
+      description: Publish-completeness failure — one detail line per broken rule (design §7).
+      properties:
+        error:
+          type: string
+          example: word is incomplete
+        details:
+          type: array
+          items:
+            type: string
+          example:
+            - "pos verb: needs exactly one base form for dialect us (got 0)"
+            - "pos verb, sense 1: at least one definition is required"
+      required: [error, details]
 
 security:
   - bearerAuth: []
